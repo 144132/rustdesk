@@ -609,15 +609,26 @@ pub fn update_temporary_password() {
 }
 
 #[inline]
-pub fn permanent_password() -> String {
+pub fn is_permanent_password_set() -> bool {
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    return Config::get_permanent_password();
+    return Config::has_permanent_password();
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
-    return ipc::get_permanent_password();
+    {
+        if ipc::is_permanent_password_set() {
+            allow_err!(ipc::sync_permanent_password_storage_from_daemon());
+            true
+        } else {
+            false
+        }
+    }
 }
 
 #[inline]
 pub fn set_permanent_password(password: String) {
+    if Config::is_disable_change_permanent_password() {
+        log::warn!("Changing permanent password is disabled");
+        return;
+    }
     #[cfg(any(target_os = "android", target_os = "ios"))]
     Config::set_permanent_password(&password);
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
