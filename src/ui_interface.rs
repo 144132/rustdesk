@@ -614,12 +614,17 @@ pub fn is_permanent_password_set() -> bool {
     return Config::has_permanent_password();
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        if ipc::is_permanent_password_set() {
-            allow_err!(ipc::sync_permanent_password_storage_from_daemon());
+        let daemon_is_set = ipc::is_permanent_password_set();
+        let local_storage_is_empty = if daemon_is_set {
             true
         } else {
-            false
+            let (storage, _) = Config::get_local_permanent_password_storage_and_salt();
+            storage.is_empty()
+        };
+        if daemon_is_set || !local_storage_is_empty {
+            allow_err!(ipc::sync_permanent_password_storage_from_daemon());
         }
+        daemon_is_set
     }
 }
 
