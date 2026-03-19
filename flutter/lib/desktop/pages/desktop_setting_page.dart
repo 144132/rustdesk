@@ -1100,7 +1100,7 @@ class _SafetyState extends State<_Safety> with AutomaticKeepAliveClientMixin {
                             if (value ==
                                     passwordValues[passwordKeys
                                         .indexOf(kUsePermanentPassword)] &&
-                                (await bind.mainIsPermanentPasswordSet())) {
+                                (!await bind.mainIsPermanentPasswordSet())) {
                               if (isChangePermanentPasswordDisabled()) {
                                 await callback();
                                 return;

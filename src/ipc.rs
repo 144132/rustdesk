@@ -717,7 +717,9 @@ async fn handle(data: Data, stream: &mut Connection) {
                 } else {
                     return;
                 }
-                log::info!("{} updated", name);
+                if updated {
+                    log::info!("{} updated", name);
+                }
             }
         },
         Data::Options(value) => match value {
