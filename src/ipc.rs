@@ -1177,11 +1177,11 @@ pub fn update_temporary_password() -> ResultType<()> {
     set_config("temporary-password", "".to_owned())
 }
 
-pub fn sync_permanent_password_storage_from_daemon() -> ResultType<()> {
-    let Some(v) = get_config("permanent-password-storage-and-salt")? else {
+fn apply_permanent_password_storage_and_salt_payload(payload: Option<&str>) -> ResultType<()> {
+    let Some(payload) = payload else {
         return Ok(());
     };
-    let Some((storage, salt)) = v.split_once('\n') else {
+    let Some((storage, salt)) = payload.split_once('\n') else {
         bail!("Invalid permanent-password-storage-and-salt payload");
     };
 
@@ -1194,23 +1194,15 @@ pub fn sync_permanent_password_storage_from_daemon() -> ResultType<()> {
     Ok(())
 }
 
+pub fn sync_permanent_password_storage_from_daemon() -> ResultType<()> {
+    let v = get_config("permanent-password-storage-and-salt")?;
+    apply_permanent_password_storage_and_salt_payload(v.as_deref())
+}
+
 async fn sync_permanent_password_storage_from_daemon_async() -> ResultType<()> {
     let ms_timeout = 1_000;
     let v = get_config_async("permanent-password-storage-and-salt", ms_timeout).await?;
-    let Some(v) = v else {
-        return Ok(());
-    };
-    let Some((storage, salt)) = v.split_once('\n') else {
-        bail!("Invalid permanent-password-storage-and-salt payload");
-    };
-
-    if storage.is_empty() {
-        Config::set_permanent_password_storage_for_sync("", "")?;
-        return Ok(());
-    }
-
-    Config::set_permanent_password_storage_for_sync(storage, salt)?;
-    Ok(())
+    apply_permanent_password_storage_and_salt_payload(v.as_deref())
 }
 
 pub fn is_permanent_password_set() -> bool {

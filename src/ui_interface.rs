@@ -615,6 +615,8 @@ pub fn is_permanent_password_set() -> bool {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let daemon_is_set = ipc::is_permanent_password_set();
+        // `daemon_is_set` is authoritative for the return value. Local storage is only used to
+        // decide whether we should attempt a sync to clear stale user-side state.
         let local_storage_is_empty = if daemon_is_set {
             true
         } else {

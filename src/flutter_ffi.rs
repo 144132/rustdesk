@@ -1708,7 +1708,13 @@ pub fn main_set_permanent_password_with_result(password: String) -> bool {
     }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
-        crate::ipc::set_permanent_password_with_ack(password).unwrap_or(false)
+        match crate::ipc::set_permanent_password_with_ack(password) {
+            Ok(ok) => ok,
+            Err(err) => {
+                log::warn!("Failed to set permanent password via IPC: {err}");
+                false
+            }
+        }
     }
 }
 
