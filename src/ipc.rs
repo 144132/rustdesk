@@ -1220,10 +1220,10 @@ pub fn is_permanent_password_set() -> bool {
             return v == "Y";
         }
         Ok(None) => {
-            // No response/value (timeout). Keep trying within this loop.
+            // No response/value (timeout).
         }
         Err(_) => {
-            // Connection error: retry with longer timeout once.
+            // Connection error.
         }
     }
     log::warn!("Failed to query permanent password state from daemon");
