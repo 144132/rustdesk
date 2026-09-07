@@ -4044,7 +4044,7 @@ List<String> getPrinterNames() {
   }
   try {
     final List<dynamic> printerNamesList = jsonDecode(printerNamesJson);
-    final appPrinterName = '$appName Printer';
+    final appPrinterName = '${bind.mainGetAppNameSync()} Printer';
     return printerNamesList
         .map((e) => e.toString())
         .where((name) => name != appPrinterName)
