@@ -63,12 +63,15 @@ int APIENTRY wWinMain(_In_ HINSTANCE instance, _In_opt_ HINSTANCE prev,
   std::vector<std::string> rust_args(c_args, c_args + args_len);
   free_c_args(c_args, args_len);
 
-  std::wstring app_name = L"RustDesk";
+  std::wstring app_name = L"\u65B0\u80B2\u667A\u6167\u6821\u56ED\u8FDC\u7A0B\u534F\u52A9";
   FUNC_RUSTDESK_GET_APP_NAME get_rustdesk_app_name = (FUNC_RUSTDESK_GET_APP_NAME)GetProcAddress(hInstance, "get_rustdesk_app_name");
   if (get_rustdesk_app_name) {
     wchar_t app_name_buffer[512] = {0};
     if (get_rustdesk_app_name(app_name_buffer, 512) == 0) {
-      app_name = std::wstring(app_name_buffer);
+      const std::wstring internal_app_name(app_name_buffer);
+      if (internal_app_name != L"RustDesk") {
+        app_name = internal_app_name;
+      }
     }
   }
 

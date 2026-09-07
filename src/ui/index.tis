@@ -546,7 +546,7 @@ class MyIdMenu: Reactor.Component {
                 <li #allow-darktheme><span>{svg_checkmark}</span>{translate('Dark Theme')}</li>
                 <Languages />
                 {disable_installation ? "" : <li #allow-auto-update><span>{svg_checkmark}</span>{translate('Auto update')}</li>} 
-                <li #about>{translate('About')} {" "}{handler.get_app_name()}</li>
+                <li #about>{translate('About')} {" "}{handler.get_display_name()}</li>
             </menu>
         </popup>;
     }
@@ -596,7 +596,7 @@ class MyIdMenu: Reactor.Component {
     }
 
     function showAbout() {
-        var name = handler.get_app_name();
+        var name = handler.get_display_name();
         msgbox("custom-nocancel-nook-hasclose", translate("About") + " " + name, "<div style='line-height: 2em'> \
             <div>Version: " + handler.get_version() + " \
             <div>Fingerprint: " + handler.get_fingerprint() + " \
@@ -824,7 +824,7 @@ class UpdateMe: Reactor.Component {
         var update_or_download = "download"; // !is_win ? "download" : "update";
         return <div .install-me>
             <div>{translate('Status')}</div>
-            <div>There is a newer version of {handler.get_app_name()} ({handler.get_new_version()}) available.</div>
+            <div>There is a newer version of {handler.get_display_name()} ({handler.get_new_version()}) available.</div>
             {is_custom_client
                 ? <div style="font-size: 1em; font-weight: normal; text-align: left; padding-top: 1em;">{translate('Enable \"Auto update\" or contact your administrator for the latest version.')}</div>
                 : <div #install-me.link>{translate('Click to ' + update_or_download)}</div>}
@@ -833,7 +833,7 @@ class UpdateMe: Reactor.Component {
     }
 
     event click $(#install-me) {
-        handler.open_url("https://rustdesk.com/download");
+        handler.open_url(software_update_url);
         return;
         if (!is_win) {
             handler.open_url("https://rustdesk.com");

@@ -2957,7 +2957,7 @@ int versionCmp(String v1, String v2) {
 }
 
 String getWindowName({WindowType? overrideType}) {
-  final name = bind.mainGetAppNameSync();
+  const name = kProductDisplayName;
   switch (overrideType ?? kWindowType) {
     case WindowType.Main:
       return name;
@@ -4058,7 +4058,7 @@ List<String> getPrinterNames() {
 String _appName = '';
 String get appName {
   if (_appName.isEmpty) {
-    _appName = bind.mainGetAppNameSync();
+    _appName = kProductDisplayName;
   }
   return _appName;
 }

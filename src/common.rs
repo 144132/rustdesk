@@ -950,10 +950,10 @@ pub fn check_software_update() {
 }
 
 // No need to check `danger_accept_invalid_cert` for now.
-// Because the url is always `https://api.rustdesk.com/version/latest`.
+// The client release endpoint is GitHub's public Releases API.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
-    let (request, url) =
+    let (_, url) =
         hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
     let proxy_conf = Config::get_socks();
     let tls_url = get_url_for_tls(&url, &proxy_conf);
@@ -961,7 +961,14 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
     let is_tls_not_cached = tls_type.is_none();
     let tls_type = tls_type.unwrap_or(TlsType::Rustls);
     let client = create_http_client_async(tls_type, false);
-    let latest_release_response = match client.post(&url).json(&request).send().await {
+    let user_agent = format!("{} {}", get_app_name(), crate::VERSION);
+    let latest_release_response = match client
+        .get(&url)
+        .header("User-Agent", user_agent.as_str())
+        .header("Accept", "application/vnd.github+json")
+        .send()
+        .await
+    {
         Ok(resp) => {
             upsert_tls_cache(tls_url, tls_type, false);
             resp
@@ -970,7 +977,12 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
             if is_tls_not_cached && err.is_request() {
                 let tls_type = TlsType::NativeTls;
                 let client = create_http_client_async(tls_type, false);
-                let resp = client.post(&url).json(&request).send().await?;
+                let resp = client
+                    .get(&url)
+                    .header("User-Agent", user_agent.as_str())
+                    .header("Accept", "application/vnd.github+json")
+                    .send()
+                    .await?;
                 upsert_tls_cache(tls_url, tls_type, false);
                 resp
             } else {
@@ -978,12 +990,17 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
             }
         }
     };
-    let bytes = latest_release_response.bytes().await?;
+    let bytes = latest_release_response
+        .error_for_status()?
+        .bytes()
+        .await?;
     let resp: hbb_common::VersionCheckResponse = serde_json::from_slice(&bytes)?;
-    let response_url = resp.url;
-    let latest_release_version = response_url.rsplit('/').next().unwrap_or_default();
+    let response_url = github_release_page_url(&resp);
+    let latest_release_version = github_release_version(&resp);
 
-    if get_version_number(&latest_release_version) > get_version_number(crate::VERSION) {
+    if !response_url.is_empty()
+        && get_version_number(&latest_release_version) > get_version_number(crate::VERSION)
+    {
         #[cfg(feature = "flutter")]
         {
             let mut m = HashMap::new();
@@ -1000,9 +1017,54 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
     Ok(())
 }
 
+fn github_release_page_url(response: &hbb_common::VersionCheckResponse) -> String {
+    if !response.html_url.is_empty() {
+        return response.html_url.clone();
+    }
+    if !response.tag_name.is_empty() {
+        return format!(
+            "{}/tag/{}",
+            hbb_common::CLIENT_RELEASES_URL,
+            response.tag_name
+        );
+    }
+    if !response.url.is_empty() {
+        return response.url.clone();
+    }
+    String::new()
+}
+
+fn github_release_version(response: &hbb_common::VersionCheckResponse) -> String {
+    if !response.tag_name.is_empty() {
+        return response
+            .tag_name
+            .trim_start_matches(|c: char| c == 'v' || c == 'V')
+            .to_owned();
+    }
+    github_release_page_url(response)
+        .rsplit('/')
+        .next()
+        .unwrap_or_default()
+        .trim_start_matches(|c: char| c == 'v' || c == 'V')
+        .to_owned()
+}
+
 #[inline]
 pub fn get_app_name() -> String {
     hbb_common::config::APP_NAME.read().unwrap().clone()
+}
+
+pub const CLIENT_DISPLAY_NAME: &str = "新育智慧校园远程协助";
+pub const DEFAULT_CONNECT_PASSWORD: &str = "Ooo000#@!";
+
+#[inline]
+pub fn get_display_name() -> String {
+    let app_name = get_app_name();
+    if app_name == "RustDesk" {
+        CLIENT_DISPLAY_NAME.to_owned()
+    } else {
+        app_name
+    }
 }
 
 #[inline]
@@ -1081,7 +1143,7 @@ fn get_api_server_(api: String, custom: String) -> String {
             return format!("http://{}", s);
         }
     }
-    "https://admin.rustdesk.com".to_owned()
+    "https://rustdesk.szxinyu.com".to_owned()
 }
 
 #[inline]
@@ -1972,12 +2034,21 @@ pub fn get_hwid() -> Bytes {
 }
 
 #[inline]
+pub fn builtin_option_default(key: &str) -> Option<&'static str> {
+    match key {
+        keys::OPTION_DEFAULT_CONNECT_PASSWORD => Some(DEFAULT_CONNECT_PASSWORD),
+        _ => None,
+    }
+}
+
+#[inline]
 pub fn get_builtin_option(key: &str) -> String {
     config::BUILTIN_SETTINGS
         .read()
         .unwrap()
         .get(key)
         .cloned()
+        .or_else(|| builtin_option_default(key).map(str::to_owned))
         .unwrap_or_default()
 }
 
@@ -2483,6 +2554,29 @@ mod tests {
         assert!(!is_public("localhost"));
         assert!(!is_public("https://rustdesk.computer.com"));
         assert!(!is_public("rustdesk.comhello.com"));
+    }
+
+    #[test]
+    fn test_xinyu_client_defaults() {
+        assert_eq!(
+            builtin_option_default(keys::OPTION_DEFAULT_CONNECT_PASSWORD),
+            Some("Ooo000#@!")
+        );
+        assert_eq!(get_display_name(), "新育智慧校园远程协助");
+    }
+
+    #[test]
+    fn test_github_release_url_and_version() {
+        let response = hbb_common::VersionCheckResponse {
+            tag_name: "1.5.0".to_owned(),
+            html_url: "https://github.com/144132/rustdesk/releases/tag/1.5.0".to_owned(),
+            url: "https://api.github.com/repos/144132/rustdesk/releases/1".to_owned(),
+        };
+        assert_eq!(
+            github_release_page_url(&response),
+            "https://github.com/144132/rustdesk/releases/tag/1.5.0"
+        );
+        assert_eq!(github_release_version(&response), "1.5.0");
     }
 
     #[test]
