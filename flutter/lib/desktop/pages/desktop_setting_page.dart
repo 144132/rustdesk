@@ -42,6 +42,49 @@ const Color _accentColor = MyTheme.accent;
 const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageTabKeyTag = 'settingPageTabKey';
 
+Future<bool> requestWindowsSettingsPassword() async {
+  if (!isWindows) {
+    return true;
+  }
+
+  final controller = TextEditingController();
+  var errorText = '';
+  try {
+    final result = await gFFI.dialogManager.show<bool>((setState, close, context) {
+      void submit() {
+        if (controller.text == kWindowsSettingsPassword) {
+          close(true);
+        } else {
+          setState(() => errorText = '密码错误');
+        }
+      }
+
+      return CustomAlertDialog(
+        title: const Text('设置密码'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          children: [
+            const Text('请输入密码后进入设置页面'),
+            PasswordWidget(
+              controller: controller,
+              errorText: errorText.isEmpty ? null : errorText,
+            ),
+          ],
+        ),
+        actions: [
+          dialogButton('取消', onPressed: close, isOutline: true),
+          dialogButton('确定', onPressed: submit),
+        ],
+        onSubmit: submit,
+        onCancel: close,
+      );
+    });
+    return result == true;
+  } finally {
+    controller.dispose();
+  }
+}
+
 class _TabInfo {
   late final SettingsTabKey key;
   late final String label;

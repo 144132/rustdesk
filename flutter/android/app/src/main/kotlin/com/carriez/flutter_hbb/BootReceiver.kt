@@ -19,10 +19,12 @@ class BootReceiver : BroadcastReceiver() {
     override fun onReceive(context: Context, intent: Intent) {
         Log.d(logTag, "onReceive ${intent.action}")
 
-        if (Intent.ACTION_BOOT_COMPLETED == intent.action || DEBUG_BOOT_COMPLETED == intent.action) {
+        if (Intent.ACTION_BOOT_COMPLETED == intent.action ||
+            "android.intent.action.QUICKBOOT_POWERON" == intent.action ||
+            DEBUG_BOOT_COMPLETED == intent.action) {
             // check SharedPreferences config
             val prefs = context.getSharedPreferences(KEY_SHARED_PREFERENCES, FlutterActivity.MODE_PRIVATE)
-            if (!prefs.getBoolean(KEY_START_ON_BOOT_OPT, false)) {
+            if (!prefs.getBoolean(KEY_START_ON_BOOT_OPT, true)) {
                 Log.d(logTag, "KEY_START_ON_BOOT_OPT is false")
                 return
             }

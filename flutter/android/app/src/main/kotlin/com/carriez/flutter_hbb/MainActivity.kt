@@ -163,6 +163,9 @@ class MainActivity : FlutterActivity() {
                         result.success(false)
                     }
                 }
+                "check_input_permission" -> {
+                    result.success(InputService.isOpen)
+                }
                 "request_permission" -> {
                     if (call.arguments is String) {
                         requestPermission(context, call.arguments as String)
@@ -232,7 +235,7 @@ class MainActivity : FlutterActivity() {
                 }
                 GET_START_ON_BOOT_OPT -> {
                     val prefs = getSharedPreferences(KEY_SHARED_PREFERENCES, MODE_PRIVATE)
-                    result.success(prefs.getBoolean(KEY_START_ON_BOOT_OPT, false))
+                    result.success(prefs.getBoolean(KEY_START_ON_BOOT_OPT, true))
                 }
                 SET_START_ON_BOOT_OPT -> {
                     if (call.arguments is Boolean) {

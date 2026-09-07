@@ -1482,6 +1482,13 @@ class AndroidPermissionManager {
     return gFFI.invokeMethod("check_permission", type);
   }
 
+  static Future<bool> checkInput() {
+    if (!isAndroid) {
+      return Future.value(false);
+    }
+    return gFFI.invokeMethod("check_input_permission");
+  }
+
   // startActivity goto Android Setting's page to request permission manually by user
   static void startAction(String action) {
     gFFI.invokeMethod(AndroidChannel.kStartAction, action);
@@ -1518,10 +1525,13 @@ class AndroidPermissionManager {
 
   static complete(String type, bool res) {
     if (type != _current) {
-      res = false;
+      return;
     }
     _timer?.cancel();
-    _completer?.complete(res);
+    if (_completer != null && !_completer!.isCompleted) {
+      _completer!.complete(res);
+    }
+    _completer = null;
     _current = "";
   }
 }

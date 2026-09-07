@@ -20,8 +20,18 @@ class DesktopTabPage extends StatefulWidget {
 
   static void onAddSetting(
       {SettingsTabKey initialPage = SettingsTabKey.general}) {
+    _onAddSetting(initialPage: initialPage);
+  }
+
+  static Future<void> _onAddSetting(
+      {SettingsTabKey initialPage = SettingsTabKey.general}) async {
     try {
-      DesktopTabController tabController = Get.find<DesktopTabController>();
+      final tabController = Get.find<DesktopTabController>();
+      final alreadyAdded = tabController.state.value.tabs
+          .any((tab) => tab.key == kTabLabelSettingPage);
+      if (!alreadyAdded && !await requestWindowsSettingsPassword()) {
+        return;
+      }
       tabController.add(TabInfo(
           key: kTabLabelSettingPage,
           label: kTabLabelSettingPage,

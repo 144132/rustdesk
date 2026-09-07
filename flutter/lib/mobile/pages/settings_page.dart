@@ -70,6 +70,8 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
       false; //androidVersion >= 26; // remove because not work on every device
   var _ignoreBatteryOpt = false;
   var _enableStartOnBoot = false;
+  var _androidPermissionFlowRunning = false;
+  var _androidInputPermissionPrompted = false;
   var _checkUpdateOnStartup = false;
   var _showTerminalExtraKeys = false;
   var _floatingWindowDisabled = false;
@@ -161,18 +163,16 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         }
       }
 
-      if (await checkAndUpdateStartOnBoot()) {
-        update = true;
-      }
-
-      // start on boot depends on ACTION_IGNORE_BATTERY_OPTIMIZATION_SETTINGS and SYSTEM_ALERT_WINDOW
       var enableStartOnBoot =
           await gFFI.invokeMethod(AndroidChannel.kGetStartOnBootOpt);
-      if (enableStartOnBoot) {
-        if (!await canStartOnBoot()) {
-          enableStartOnBoot = false;
-          gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, false);
-        }
+
+      if (isAndroid) {
+        await _prepareAndroidStartupPermissions(
+            guideInput: true, startupEnabled: enableStartOnBoot);
+      }
+
+      if (await checkAndUpdateStartOnBoot()) {
+        update = true;
       }
 
       if (enableStartOnBoot != _enableStartOnBoot) {
@@ -259,14 +259,61 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
   }
 
   Future<bool> checkAndUpdateStartOnBoot() async {
-    if (!await canStartOnBoot() && _enableStartOnBoot) {
-      _enableStartOnBoot = false;
-      debugPrint(
-          "checkAndUpdateStartOnBoot and set _enableStartOnBoot -> false");
-      gFFI.invokeMethod(AndroidChannel.kSetStartOnBootOpt, false);
-      return true;
-    } else {
+    if (!isAndroid) {
       return false;
+    }
+    final enabled =
+        await gFFI.invokeMethod(AndroidChannel.kGetStartOnBootOpt);
+    if (enabled != _enableStartOnBoot) {
+      _enableStartOnBoot = enabled;
+      return true;
+    }
+    return false;
+  }
+
+  Future<bool> _prepareAndroidStartupPermissions(
+      {bool guideInput = false, bool startupEnabled = true}) async {
+    if (!isAndroid || _androidPermissionFlowRunning) {
+      return true;
+    }
+
+    _androidPermissionFlowRunning = true;
+    try {
+      var batteryReady = true;
+      var overlayReady = true;
+      if (startupEnabled) {
+        // Android 13+ needs notification permission for the foreground service.
+        if (androidVersion >= 33 &&
+            !await AndroidPermissionManager.check(kAndroid13Notification)) {
+          await AndroidPermissionManager.request(kAndroid13Notification);
+        }
+
+        if (androidVersion >= 23 &&
+            !await AndroidPermissionManager.check(
+                kRequestIgnoreBatteryOptimizations)) {
+          batteryReady = await AndroidPermissionManager.request(
+              kRequestIgnoreBatteryOptimizations);
+        }
+
+        overlayReady =
+            await AndroidPermissionManager.check(kSystemAlertWindow);
+        if (!overlayReady) {
+          overlayReady =
+              await AndroidPermissionManager.request(kSystemAlertWindow);
+        }
+      }
+
+      if (guideInput &&
+          !_androidInputPermissionPrompted &&
+          !await AndroidPermissionManager.checkInput()) {
+        // Accessibility input control must be enabled manually by the user.
+        _androidInputPermissionPrompted = true;
+        AndroidPermissionManager.startAction(kActionAccessibilitySettings);
+      }
+
+      return batteryReady && overlayReady;
+    } finally {
+      _androidPermissionFlowRunning = false;
     }
   }
 
@@ -569,23 +616,9 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
         ]),
         onToggle: (toValue) async {
           if (toValue) {
-            // 1. request kIgnoreBatteryOptimizations
-            if (!await AndroidPermissionManager.check(
-                kRequestIgnoreBatteryOptimizations)) {
-              if (!await AndroidPermissionManager.request(
-                  kRequestIgnoreBatteryOptimizations)) {
-                return;
-              }
+            if (!await _prepareAndroidStartupPermissions()) {
+              return;
             }
-
-            // 2. request kSystemAlertWindow
-            if (!await AndroidPermissionManager.check(kSystemAlertWindow)) {
-              if (!await AndroidPermissionManager.request(kSystemAlertWindow)) {
-                return;
-              }
-            }
-
-            // (Optional) 3. request input permission
           }
           setState(() => _enableStartOnBoot = toValue);
 
