@@ -23,7 +23,7 @@ use std::{
     sync::{Arc, Mutex},
 };
 
-use crate::common::SOFTWARE_UPDATE_URL;
+use crate::common::SOFTWARE_UPDATE_VERSION;
 #[cfg(feature = "flutter")]
 use crate::hbbs_http::account;
 #[cfg(not(any(target_os = "ios")))]
@@ -747,13 +747,7 @@ pub fn current_is_wayland() -> bool {
 
 #[inline]
 pub fn get_new_version() -> String {
-    (*SOFTWARE_UPDATE_URL
-        .lock()
-        .unwrap()
-        .rsplit('/')
-        .next()
-        .unwrap_or(""))
-    .to_string()
+    SOFTWARE_UPDATE_VERSION.lock().unwrap().clone()
 }
 
 #[inline]
@@ -1329,7 +1323,16 @@ pub fn get_login_device_info() -> LoginDeviceInfo {
         // std::env::consts::OS is better than whoami::platform() here.
         os: std::env::consts::OS.to_owned(),
         r#type: "client".to_owned(),
-        name: crate::common::hostname(),
+        name: {
+            #[cfg(windows)]
+            {
+                crate::device_name::remote_device_name()
+            }
+            #[cfg(not(windows))]
+            {
+                crate::common::hostname()
+            }
+        },
     }
 }
 

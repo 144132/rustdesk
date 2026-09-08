@@ -1804,7 +1804,7 @@ impl Connection {
 
         #[cfg(not(target_os = "android"))]
         {
-            pi.hostname = crate::whoami_hostname();
+            pi.hostname = crate::device_name::remote_device_name();
             pi.platform = hbb_common::whoami::platform().to_string();
         }
         #[cfg(target_os = "android")]

@@ -1,4 +1,7 @@
-use crate::{common::do_check_software_update, hbbs_http::create_http_client_with_url_strict};
+use crate::{
+    common::{do_check_software_update, get_software_update_version},
+    hbbs_http::create_http_client_with_url_strict,
+};
 use hbb_common::{bail, config, log, ResultType};
 use std::{
     io::Write,
@@ -193,26 +196,11 @@ fn check_update(manually: bool) -> ResultType<()> {
     if update_url.is_empty() {
         log::debug!("No update available.");
     } else {
-        let download_url = update_url.replace("tag", "download");
-        let version = download_url.split('/').last().unwrap_or_default();
-        #[cfg(target_os = "windows")]
-        let download_url = if cfg!(feature = "flutter") {
-            let Some(arch) = crate::platform::windows::release_arch_suffix() else {
-                bail!(
-                    "Unsupported Windows release architecture: {}",
-                    std::env::consts::ARCH
-                );
-            };
-            format!(
-                "{}/rustdesk-{}-{}.{}",
-                download_url,
-                version,
-                arch,
-                if update_msi { "msi" } else { "exe" }
-            )
-        } else {
-            format!("{}/rustdesk-{}-x86-sciter.exe", download_url, version)
-        };
+        let download_url = update_url;
+        let version = get_software_update_version();
+        if version.is_empty() {
+            bail!("Update manifest returned a package without a version");
+        }
         log::debug!("New version available: {}", &version);
         let client = create_http_client_with_url_strict(&download_url)?;
         let Some(file_path) = get_download_file_from_url(&download_url) else {
@@ -354,6 +342,20 @@ fn update_new_version(update_msi: bool, version: &str, file_path: &PathBuf) {
 
 pub fn get_update_download_file_from_url(url: &str) -> Option<PathBuf> {
     let parsed = url::Url::parse(url).ok()?;
+    let is_github_asset = is_expected_github_asset_url(url, &parsed);
+    if !is_github_asset && !crate::update_manifest::is_configured_update_download_url(url) {
+        return None;
+    }
+
+    let filename = parsed.path_segments()?.last()?;
+    if !is_plain_update_filename(filename) {
+        return None;
+    }
+
+    Some(std::env::temp_dir().join(filename))
+}
+
+fn is_expected_github_asset_url(url: &str, parsed: &url::Url) -> bool {
     // Check the raw prefix before Url normalizes default ports.
     if !url.starts_with("https://github.com/")
         || parsed.scheme() != "https"
@@ -364,29 +366,27 @@ pub fn get_update_download_file_from_url(url: &str) -> Option<PathBuf> {
         || parsed.query().is_some()
         || parsed.fragment().is_some()
     {
-        return None;
+        return false;
     }
 
-    let mut segments = parsed.path_segments()?;
-    let owner = segments.next()?;
-    let repo = segments.next()?;
-    let releases = segments.next()?;
-    let download = segments.next()?;
-    let tag = segments.next()?;
-    let filename = segments.next()?;
+    let mut segments = match parsed.path_segments() {
+        Some(segments) => segments,
+        None => return false,
+    };
+    let owner = segments.next();
+    let repo = segments.next();
+    let releases = segments.next();
+    let download = segments.next();
+    let tag = segments.next();
+    let filename = segments.next();
 
-    if owner != "rustdesk"
-        || repo != "rustdesk"
-        || releases != "releases"
-        || download != "download"
-        || tag.is_empty()
-        || segments.next().is_some()
-        || !is_plain_update_filename(filename)
-    {
-        return None;
-    }
-
-    Some(std::env::temp_dir().join(filename))
+    owner == Some("rustdesk")
+        && repo == Some("rustdesk")
+        && releases == Some("releases")
+        && download == Some("download")
+        && tag.is_some_and(|tag| !tag.is_empty())
+        && segments.next().is_none()
+        && filename.is_some_and(|filename| is_plain_update_filename(filename))
 }
 
 fn is_plain_update_filename(filename: &str) -> bool {
@@ -539,10 +539,6 @@ pub fn check_update_as_root() -> ResultType<bool> {
         log::info!("[root-update] Auto update is disabled, skipping.");
         return Ok(false);
     }
-    if crate::is_custom_client() {
-        log::info!("[root-update] Custom client detected, skipping stock update.");
-        return Ok(false);
-    }
     // Clean up only old temp dirs from previous failed updates. The detached
     // installer keeps using its update directory after this process exits and
     // releases the advisory lock, so a newly-started daemon must not remove a
@@ -585,17 +581,22 @@ pub fn check_update_as_root() -> ResultType<bool> {
         log::info!("[root-update] No update available.");
         return Ok(false);
     }
-    let download_url = update_url.replace("tag", "download");
-    let version = download_url.split('/').last().unwrap_or_default().to_string();
-    let arch = if std::env::consts::ARCH == "aarch64" { "aarch64" } else { "x86_64" };
-    let dmg_url = format!("{}/rustdesk-{}-{}.dmg", download_url, version, arch);
-    log::info!("[root-update] New version: {}, downloading from {}", version, dmg_url);
-    // Validate URL against GitHub release allowlist before downloading as root
-    let Some(file_path_validated) = get_update_download_file_from_url(&dmg_url) else {
-        bail!("[root-update] URL failed allowlist check: {}", dmg_url);
+    let download_url = update_url;
+    let version = get_software_update_version();
+    if version.is_empty() {
+        bail!("[root-update] Update manifest returned a package without a version");
+    }
+    log::info!(
+        "[root-update] New version: {}, downloading from {}",
+        version,
+        download_url
+    );
+    // Validate URL against the GitHub or configured update-server allowlist before downloading as root
+    let Some(file_path_validated) = get_update_download_file_from_url(&download_url) else {
+        bail!("[root-update] URL failed allowlist check: {}", download_url);
     };
     drop(file_path_validated);
-    let client = create_http_client_with_url_strict(&dmg_url)?;
+    let client = create_http_client_with_url_strict(&download_url)?;
     // Use mktemp so a local user cannot pre-create a predictable path and
     // permanently deny updates for a reused service PID.
     let private_tmp_output = std::process::Command::new("/usr/bin/mktemp")
@@ -618,11 +619,18 @@ pub fn check_update_as_root() -> ResultType<bool> {
         use std::os::unix::fs::PermissionsExt;
         std::fs::set_permissions(&private_tmp, std::fs::Permissions::from_mode(0o700))?;
     }
-    let filename = dmg_url.split('/').last().unwrap_or("rustdesk.dmg");
+    let filename = url::Url::parse(&download_url)
+        .ok()
+        .and_then(|url| {
+            url.path_segments()
+                .and_then(|mut segments| segments.next_back())
+        })
+        .filter(|filename| !filename.is_empty())
+        .unwrap_or("rustdesk.dmg");
     let file_path = std::path::PathBuf::from(format!("{}/{}", private_tmp, filename));
     let tmp_path = file_path.to_string_lossy().to_string();
     // Download
-    let mut response = client.get(&dmg_url).send()?;
+    let mut response = client.get(&download_url).send()?;
     if !response.status().is_success() {
         let _ = std::fs::remove_dir_all(&private_tmp);
         bail!("[root-update] Failed to download: {}", response.status());
@@ -668,6 +676,19 @@ mod tests {
         assert_eq!(
             file.file_name().and_then(|name| name.to_str()),
             Some("rustdesk-1.4.0-x86_64.dmg")
+        );
+    }
+
+    #[test]
+    fn update_download_file_accepts_configured_update_asset_urls() {
+        let file = get_download_file_from_url(
+            "https://update.szxinyu.com/rustdesk/xy-rustdesk-1.5.0-x86_64.exe",
+        )
+        .expect("valid configured update asset URL");
+
+        assert_eq!(
+            file.file_name().and_then(|name| name.to_str()),
+            Some("xy-rustdesk-1.5.0-x86_64.exe")
         );
     }
 

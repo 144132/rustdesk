@@ -13,12 +13,14 @@ mod server;
 pub use self::server::*;
 mod client;
 mod lan;
+pub(crate) mod device_name;
 #[cfg(not(any(target_os = "ios")))]
 mod rendezvous_mediator;
 #[cfg(not(any(target_os = "ios")))]
 pub use self::rendezvous_mediator::*;
 /// cbindgen:ignore
 pub mod common;
+mod update_manifest;
 #[cfg(not(any(target_os = "ios")))]
 pub mod ipc;
 #[cfg(not(any(

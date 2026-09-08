@@ -39,6 +39,7 @@ use hbb_common::{
 
 use crate::{
     hbbs_http::{create_http_client_async, get_url_for_tls},
+    update_manifest::{parse_latest_yml, select_update_package},
     ui_interface::{get_api_server as ui_get_api_server, get_option, is_installed, set_option},
 };
 
@@ -94,6 +95,7 @@ pub mod input {
 
 lazy_static::lazy_static! {
     pub static ref SOFTWARE_UPDATE_URL: Arc<Mutex<String>> = Default::default();
+    pub static ref SOFTWARE_UPDATE_VERSION: Arc<Mutex<String>> = Default::default();
     pub static ref DEVICE_ID: Arc<Mutex<String>> = Default::default();
     pub static ref DEVICE_NAME: Arc<Mutex<String>> = Default::default();
     static ref PUBLIC_IPV6_ADDR: Arc<Mutex<(Option<SocketAddr>, Option<Instant>)>> = Default::default();
@@ -996,21 +998,45 @@ pub fn is_modifier(evt: &KeyEvent) -> bool {
 }
 
 pub fn check_software_update() {
-    if is_custom_client() {
-        return;
-    }
     let opt = LocalConfig::get_option(keys::OPTION_ENABLE_CHECK_UPDATE);
     if config::option2bool(keys::OPTION_ENABLE_CHECK_UPDATE, &opt) {
         std::thread::spawn(move || allow_err!(do_check_software_update()));
     }
 }
 
+pub fn get_software_update_version() -> String {
+    SOFTWARE_UPDATE_VERSION.lock().unwrap().clone()
+}
+
+fn clear_software_update() {
+    *SOFTWARE_UPDATE_URL.lock().unwrap() = String::new();
+    *SOFTWARE_UPDATE_VERSION.lock().unwrap() = String::new();
+}
+
+fn current_update_file_extension() -> Option<&'static str> {
+    #[cfg(target_os = "windows")]
+    {
+        let use_msi = !is_custom_client()
+            && crate::platform::is_msi_installed().unwrap_or_default();
+        return Some(if use_msi { "msi" } else { "exe" });
+    }
+    #[cfg(target_os = "macos")]
+    return Some("dmg");
+    #[cfg(target_os = "android")]
+    return Some("apk");
+    #[cfg(not(any(
+        target_os = "windows",
+        target_os = "macos",
+        target_os = "android"
+    )))]
+    None
+}
+
 // No need to check `danger_accept_invalid_cert` for now.
-// The client release endpoint is GitHub's public Releases API.
+// The client update endpoint is the configured HTTPS latest.yml manifest.
 #[tokio::main(flavor = "current_thread")]
 pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
-    let (_, url) =
-        hbb_common::version_check_request(hbb_common::VER_TYPE_RUSTDESK_CLIENT.to_string());
+    let url = crate::update_manifest::UPDATE_MANIFEST_URL.to_owned();
     let proxy_conf = Config::get_socks();
     let tls_url = get_url_for_tls(&url, &proxy_conf);
     let tls_type = get_cached_tls_type(tls_url);
@@ -1018,10 +1044,10 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
     let tls_type = tls_type.unwrap_or(TlsType::Rustls);
     let client = create_http_client_async(tls_type, false);
     let user_agent = format!("{} {}", get_app_name(), crate::VERSION);
-    let latest_release_response = match client
+    let manifest_response = match client
         .get(&url)
         .header("User-Agent", user_agent.as_str())
-        .header("Accept", "application/vnd.github+json")
+        .header("Accept", "text/yaml, text/plain;q=0.9")
         .send()
         .await
     {
@@ -1036,7 +1062,7 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
                 let resp = client
                     .get(&url)
                     .header("User-Agent", user_agent.as_str())
-                    .header("Accept", "application/vnd.github+json")
+                    .header("Accept", "text/yaml, text/plain;q=0.9")
                     .send()
                     .await?;
                 upsert_tls_cache(tls_url, tls_type, false);
@@ -1046,63 +1072,48 @@ pub async fn do_check_software_update() -> hbb_common::ResultType<()> {
             }
         }
     };
-    let bytes = latest_release_response
+    let bytes = manifest_response
         .error_for_status()?
         .bytes()
         .await?;
-    let resp: hbb_common::VersionCheckResponse = serde_json::from_slice(&bytes)?;
-    let response_url = github_release_page_url(&resp);
-    let latest_release_version = github_release_version(&resp);
+    let manifest_text = std::str::from_utf8(&bytes)
+        .map_err(|error| anyhow!("latest.yml is not valid UTF-8: {error}"))?;
+    let manifest = parse_latest_yml(manifest_text)
+        .map_err(|error| anyhow!("failed to parse latest.yml: {error}"))?;
+    let Some(extension) = current_update_file_extension() else {
+        clear_software_update();
+        return Ok(());
+    };
+    let package = match select_update_package(
+        &url,
+        &manifest,
+        extension,
+        std::env::consts::ARCH,
+    ) {
+        Ok(package) => package,
+        Err(error) => {
+            log::debug!("No compatible update package: {error}");
+            clear_software_update();
+            return Ok(());
+        }
+    };
 
-    if !response_url.is_empty()
-        && get_version_number(&latest_release_version) > get_version_number(crate::VERSION)
-    {
+    if get_version_number(&package.version) > get_version_number(crate::VERSION) {
         #[cfg(feature = "flutter")]
         {
             let mut m = HashMap::new();
             m.insert("name", "check_software_update_finish");
-            m.insert("url", &response_url);
+            m.insert("url", &package.url);
             if let Ok(data) = serde_json::to_string(&m) {
                 let _ = crate::flutter::push_global_event(crate::flutter::APP_TYPE_MAIN, data);
             }
         }
-        *SOFTWARE_UPDATE_URL.lock().unwrap() = response_url;
+        *SOFTWARE_UPDATE_URL.lock().unwrap() = package.url;
+        *SOFTWARE_UPDATE_VERSION.lock().unwrap() = package.version;
     } else {
-        *SOFTWARE_UPDATE_URL.lock().unwrap() = "".to_string();
+        clear_software_update();
     }
     Ok(())
-}
-
-fn github_release_page_url(response: &hbb_common::VersionCheckResponse) -> String {
-    if !response.html_url.is_empty() {
-        return response.html_url.clone();
-    }
-    if !response.tag_name.is_empty() {
-        return format!(
-            "{}/tag/{}",
-            hbb_common::CLIENT_RELEASES_URL,
-            response.tag_name
-        );
-    }
-    if !response.url.is_empty() {
-        return response.url.clone();
-    }
-    String::new()
-}
-
-fn github_release_version(response: &hbb_common::VersionCheckResponse) -> String {
-    if !response.tag_name.is_empty() {
-        return response
-            .tag_name
-            .trim_start_matches(|c: char| c == 'v' || c == 'V')
-            .to_owned();
-    }
-    github_release_page_url(response)
-        .rsplit('/')
-        .next()
-        .unwrap_or_default()
-        .trim_start_matches(|c: char| c == 'v' || c == 'V')
-        .to_owned()
 }
 
 #[inline]
@@ -3110,20 +3121,6 @@ mod tests {
             Some("Ooo000#@!")
         );
         assert_eq!(get_display_name(), "新育智慧校园远程协助");
-    }
-
-    #[test]
-    fn test_github_release_url_and_version() {
-        let response = hbb_common::VersionCheckResponse {
-            tag_name: "1.5.0".to_owned(),
-            html_url: "https://github.com/144132/rustdesk/releases/tag/1.5.0".to_owned(),
-            url: "https://api.github.com/repos/144132/rustdesk/releases/1".to_owned(),
-        };
-        assert_eq!(
-            github_release_page_url(&response),
-            "https://github.com/144132/rustdesk/releases/tag/1.5.0"
-        );
-        assert_eq!(github_release_version(&response), "1.5.0");
     }
 
     #[test]

@@ -170,6 +170,8 @@ async fn start_hbbs_sync_async() {
                     }
                     let device_name = Config::get_option(keys::OPTION_PRESET_DEVICE_NAME);
                     if !device_name.is_empty() {
+                        #[cfg(windows)]
+                        let device_name = crate::device_name::remote_device_name();
                         v["hostname"] = json!(device_name);
                     }
                     let note = Config::get_option(keys::OPTION_PRESET_NOTE);

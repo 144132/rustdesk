@@ -448,6 +448,24 @@ class _GeneralState extends State<_General> {
       isWeb ? RxBool(false) : Get.find<RxBool>(tag: 'stop-service');
   RxBool serviceBtnEnabled = true.obs;
   final GlobalKey _minToolbarOptionKey = GlobalKey();
+  final TextEditingController _deviceNameController = TextEditingController();
+  bool _deviceNameChanged = false;
+  bool _deviceNameSaving = false;
+
+  @override
+  void initState() {
+    super.initState();
+    if (isWindows) {
+      _deviceNameController.text =
+          bind.mainGetOptionSync(key: kOptionPresetDeviceName);
+    }
+  }
+
+  @override
+  void dispose() {
+    _deviceNameController.dispose();
+    super.dispose();
+  }
 
   @override
   Widget build(BuildContext context) {
@@ -465,6 +483,62 @@ class _GeneralState extends State<_General> {
         other()
       ],
     ).marginOnly(bottom: _kListViewBottomMargin);
+  }
+
+  Widget deviceName() {
+    final isOptFixed = isOptionFixed(kOptionPresetDeviceName);
+    final enabled = !isOptFixed;
+    return _SubLabeledWidget(
+      context,
+      'Display Name',
+      Row(
+        children: [
+          SizedBox(
+            width: 260,
+            child: TextField(
+              controller: _deviceNameController,
+              enabled: enabled,
+              autocorrect: false,
+              maxLength: 64,
+              onChanged: (_) {
+                if (!_deviceNameChanged) {
+                  setState(() => _deviceNameChanged = true);
+                }
+              },
+              decoration: InputDecoration(
+                hintText: translate('Display Name'),
+                counterText: '',
+                contentPadding:
+                    const EdgeInsets.symmetric(vertical: 12, horizontal: 12),
+              ),
+            ).workaroundFreezeLinuxMint(),
+          ),
+          const SizedBox(width: 10),
+          ElevatedButton(
+            onPressed: enabled && _deviceNameChanged && !_deviceNameSaving
+                ? () async {
+                    final value = _deviceNameController.text.trim();
+                    setState(() => _deviceNameSaving = true);
+                    try {
+                      await bind.mainSetOption(
+                          key: kOptionPresetDeviceName, value: value);
+                      if (mounted) {
+                        setState(() => _deviceNameChanged = false);
+                        showToast(translate('Successful'));
+                      }
+                    } finally {
+                      if (mounted) {
+                        setState(() => _deviceNameSaving = false);
+                      }
+                    }
+                  }
+                : null,
+            child: Text(translate('Apply')),
+          ),
+        ],
+      ),
+      enabled: enabled,
+    );
   }
 
   Widget theme() {
@@ -528,6 +602,7 @@ class _GeneralState extends State<_General> {
     final showAutoUpdate = (isWindows && bind.mainIsInstalled()) ||
     (isMacOS && bind.mainIsInstalled() && bind.mainIsInstalledDaemon(prompt: false) && !bind.isCustomClient());
     final children = <Widget>[
+      if (isWindows) deviceName(),
       if (!isWeb && !incomingOnly)
         _OptionCheckBox(context, 'Confirm before closing multiple tabs',
             kOptionEnableConfirmClosingTabs,
