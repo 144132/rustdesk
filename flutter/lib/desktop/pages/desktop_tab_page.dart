@@ -23,14 +23,17 @@ class DesktopTabPage extends StatefulWidget {
     _onAddSetting(initialPage: initialPage);
   }
 
-  static Future<void> _onAddSetting(
+  static Future<bool> onAddSettingAsync(
+      {SettingsTabKey initialPage = SettingsTabKey.general}) {
+    return _onAddSetting(initialPage: initialPage);
+  }
+
+  static Future<bool> _onAddSetting(
       {SettingsTabKey initialPage = SettingsTabKey.general}) async {
     try {
       final tabController = Get.find<DesktopTabController>();
-      final alreadyAdded = tabController.state.value.tabs
-          .any((tab) => tab.key == kTabLabelSettingPage);
-      if (!alreadyAdded && !await requestWindowsSettingsPassword()) {
-        return;
+      if (!await requestWindowsSettingsPassword()) {
+        return false;
       }
       tabController.add(TabInfo(
           key: kTabLabelSettingPage,
@@ -40,9 +43,12 @@ class DesktopTabPage extends StatefulWidget {
           page: DesktopSettingPage(
             key: const ValueKey(kTabLabelSettingPage),
             initialTabkey: initialPage,
-          )));
+          ),
+          onBeforeTap: requestWindowsSettingsPassword));
+      return true;
     } catch (e) {
       debugPrintStack(label: '$e');
+      return false;
     }
   }
 }
@@ -78,6 +84,9 @@ class _DesktopTabPageState extends State<DesktopTabPage> {
   @override
   void initState() {
     super.initState();
+    WidgetsBinding.instance.addPostFrameCallback((_) {
+      requestInitialWindowsDeviceName();
+    });
     // HardwareKeyboard.instance.addHandler(_handleKeyEvent);
   }
 

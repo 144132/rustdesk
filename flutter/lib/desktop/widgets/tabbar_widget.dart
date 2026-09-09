@@ -34,6 +34,7 @@ class TabInfo {
   final bool closable;
   final VoidCallback? onTabCloseButton;
   final VoidCallback? onTap;
+  final Future<bool> Function()? onBeforeTap;
   final Widget page;
 
   TabInfo(
@@ -44,6 +45,7 @@ class TabInfo {
       this.closable = true,
       this.onTabCloseButton,
       this.onTap,
+      this.onBeforeTap,
       required this.page});
 }
 
@@ -182,6 +184,17 @@ class DesktopTabController {
   bool jumpToByKey(String key, {bool callOnSelected = true}) =>
       jumpTo(state.value.tabs.indexWhere((tab) => tab.key == key),
           callOnSelected: callOnSelected);
+
+  Future<bool> selectTab(int index) async {
+    if (!isDesktop || index < 0 || index >= state.value.tabs.length) {
+      return false;
+    }
+    final tab = state.value.tabs[index];
+    if (tab.onBeforeTap != null && !await tab.onBeforeTap!()) {
+      return false;
+    }
+    return jumpTo(index);
+  }
 
   bool jumpToByKeyAndDisplay(String key, int display, {bool isCamera = false}) {
     for (int i = 0; i < state.value.tabs.length; i++) {
@@ -1001,9 +1014,10 @@ class _ListView extends StatelessWidget {
                         controller.remove(index);
                       }
                     },
-                    onTap: () {
-                      controller.jumpTo(index);
-                      tab.onTap?.call();
+                    onTap: () async {
+                      if (await controller.selectTab(index)) {
+                        tab.onTap?.call();
+                      }
                     },
                     tabBuilder: tabBuilder,
                     tabMenuBuilder: tabMenuBuilder,
@@ -1377,10 +1391,9 @@ class _TabDropDownButtonState extends State<_TabDropDownButton> {
             return PopupMenuItem<String>(
               value: e,
               height: 32,
-              onTap: () {
-                widget.controller.jumpToByKey(e);
-                if (Navigator.of(context).canPop()) {
-                  Navigator.of(context).pop();
+              onTap: () async {
+                if (await widget.controller.selectTab(index)) {
+                  tabInfo?.onTap?.call();
                 }
               },
               child: MouseRegion(

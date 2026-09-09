@@ -5,7 +5,7 @@ import 'package:flutter_hbb/models/state_model.dart';
 import 'package:get/get.dart';
 
 const String kProductDisplayName = "新育智慧校园远程协助";
-const String kWindowsSettingsPassword = "wwyibu";
+const String kWindowsSettingsPassword = "wwwyibu";
 
 const int kMaxVirtualDisplayCount = 4;
 const int kAllVirtualDisplay = -1;

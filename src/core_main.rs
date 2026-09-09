@@ -220,11 +220,24 @@ pub fn core_main() -> Option<Vec<String>> {
         #[cfg(windows)]
         {
             use crate::platform;
-            if args[0] == "--uninstall" {
+            if args[0] == "--uninstall-authorized" {
                 if let Err(err) = platform::uninstall_me(true) {
                     log::error!("Failed to uninstall: {}", err);
                 }
                 return None;
+            } else if args[0] == "--uninstall" {
+                #[cfg(feature = "flutter")]
+                {
+                    flutter_args.push("--uninstall".to_owned());
+                    return Some(flutter_args);
+                }
+                #[cfg(not(feature = "flutter"))]
+                {
+                    if let Err(err) = platform::uninstall_me(true) {
+                        log::error!("Failed to uninstall: {}", err);
+                    }
+                    return None;
+                }
             } else if args[0] == "--update" {
                 if config::is_disable_installation() {
                     return None;

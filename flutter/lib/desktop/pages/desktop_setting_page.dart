@@ -9,6 +9,7 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/audio_input.dart';
 import 'package:flutter_hbb/common/widgets/setting_widgets.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/desktop/desktop_access_policy.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_home_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_toolbar.dart';
@@ -40,11 +41,30 @@ const Color _accentColor = MyTheme.accent;
 const String _kSettingPageControllerTag = 'settingPageController';
 const String _kSettingPageTabKeyTag = 'settingPageTabKey';
 
+Future<bool>? _settingsPasswordRequest;
+
 Future<bool> requestWindowsSettingsPassword() async {
   if (!isWindows) {
     return true;
   }
 
+  final pending = _settingsPasswordRequest;
+  if (pending != null) {
+    return await pending;
+  }
+
+  final request = _showWindowsSettingsPassword();
+  _settingsPasswordRequest = request;
+  try {
+    return await request;
+  } finally {
+    if (identical(_settingsPasswordRequest, request)) {
+      _settingsPasswordRequest = null;
+    }
+  }
+}
+
+Future<bool> _showWindowsSettingsPassword() async {
   final controller = TextEditingController();
   var errorText = '';
   try {
@@ -78,6 +98,105 @@ Future<bool> requestWindowsSettingsPassword() async {
       );
     });
     return result == true;
+  } finally {
+    controller.dispose();
+  }
+}
+
+Future<void>? _initialDeviceNameRequest;
+
+Future<void> requestInitialWindowsDeviceName() async {
+  if (!isWindows) {
+    return;
+  }
+
+  try {
+    if (!shouldRequestInitialDeviceName(
+      isWindows: isWindows,
+      isInstalled: bind.mainIsInstalled(),
+      currentName: bind.mainGetOptionSync(key: kOptionPresetDeviceName),
+    )) {
+      return;
+    }
+  } catch (e) {
+    debugPrint('Failed to check initial device name: $e');
+    return;
+  }
+
+  final pending = _initialDeviceNameRequest;
+  if (pending != null) {
+    await pending;
+    return;
+  }
+
+  final request = _showInitialWindowsDeviceName();
+  _initialDeviceNameRequest = request;
+  try {
+    await request;
+  } catch (e) {
+    debugPrint('Failed to request initial device name: $e');
+  } finally {
+    if (identical(_initialDeviceNameRequest, request)) {
+      _initialDeviceNameRequest = null;
+    }
+  }
+}
+
+Future<void> _showInitialWindowsDeviceName() async {
+  final controller = TextEditingController();
+  var errorText = '';
+  var saving = false;
+  try {
+    await gFFI.dialogManager.show<bool>((setState, close, context) {
+      Future<void> submit() async {
+        if (saving) {
+          return;
+        }
+        final value = controller.text.trim();
+        if (value.isEmpty) {
+          setState(() => errorText = '设备名称不能为空');
+          return;
+        }
+
+        setState(() {
+          saving = true;
+          errorText = '';
+        });
+        try {
+          await bind.mainSetOption(
+              key: kOptionPresetDeviceName, value: value);
+          close(true);
+        } catch (e) {
+          debugPrint('Failed to save initial device name: $e');
+          setState(() {
+            saving = false;
+            errorText = '保存失败，请重试';
+          });
+        }
+      }
+
+      return CustomAlertDialog(
+        title: const Text('设置设备名称'),
+        content: Column(
+          mainAxisSize: MainAxisSize.min,
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            const Text('请为这台电脑设置设备名称，远程连接时对方可以看到。'),
+            DialogTextField(
+              title: '设备名称',
+              hintText: '请输入设备名称',
+              controller: controller,
+              errorText: errorText.isEmpty ? null : errorText,
+              maxLength: 64,
+            ),
+          ],
+        ),
+        actions: [
+          dialogButton('确定', onPressed: saving ? null : submit),
+        ],
+        onSubmit: submit,
+      );
+    });
   } finally {
     controller.dispose();
   }
@@ -129,23 +248,23 @@ class DesktopSettingPage extends StatefulWidget {
   State<DesktopSettingPage> createState() =>
       _DesktopSettingPageState(initialTabkey);
 
-  static void switch2page(SettingsTabKey page) {
+  static Future<void> switch2page(SettingsTabKey page) async {
     try {
       int index = tabKeys.indexOf(page);
       if (index == -1) {
         return;
       }
+      if (!await DesktopTabPage.onAddSettingAsync(initialPage: page)) {
+        return;
+      }
       if (Get.isRegistered<PageController>(tag: _kSettingPageControllerTag) &&
           Get.isRegistered<Rx<SettingsTabKey>>(tag: _kSettingPageTabKeyTag)) {
-        DesktopTabPage.onAddSetting(initialPage: page);
         PageController controller =
             Get.find<PageController>(tag: _kSettingPageControllerTag);
         Rx<SettingsTabKey> selected =
             Get.find<Rx<SettingsTabKey>>(tag: _kSettingPageTabKeyTag);
         selected.value = page;
         controller.jumpToPage(index);
-      } else {
-        DesktopTabPage.onAddSetting(initialPage: page);
       }
     } catch (e) {
       debugPrintStack(label: '$e');
