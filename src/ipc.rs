@@ -903,7 +903,9 @@ async fn handle(data: Data, stream: &mut Connection) {
         Data::Config((name, value)) => match value {
             None => {
                 let value;
-                if name == "id" {
+                if crate::server_config_policy::is_locked_config_query(&name) {
+                    value = None;
+                } else if name == "id" {
                     value = Some(Config::get_id());
                 } else if name == "temporary-password" {
                     value = Some(password::temporary_password());
@@ -997,10 +999,12 @@ async fn handle(data: Data, stream: &mut Connection) {
         },
         Data::Options(value) => match value {
             None => {
-                let v = Config::get_options();
+                let mut v = Config::get_options();
+                crate::server_config_policy::remove_locked_options(&mut v);
                 allow_err!(stream.send(&Data::Options(Some(v))).await);
             }
-            Some(value) => {
+            Some(mut value) => {
+                crate::server_config_policy::remove_locked_options(&mut value);
                 let _chk = CheckIfRestart::new();
                 let _nat = CheckTestNatType::new();
                 if let Some(v) = value.get("privacy-mode-impl-key") {
@@ -1015,17 +1019,20 @@ async fn handle(data: Data, stream: &mut Connection) {
             allow_err!(stream.send(&Data::NatType(Some(t))).await);
         }
         Data::SyncConfig(Some(configs)) => {
-            let (config, config2) = *configs;
+            let (config, mut config2) = *configs;
+            crate::server_config_policy::remove_locked_options(&mut config2.options);
             let _chk = CheckIfRestart::new();
             Config::set(config);
             Config2::set(config2);
             allow_err!(stream.send(&Data::SyncConfig(None)).await);
         }
         Data::SyncConfig(None) => {
+            let mut config2 = Config2::get();
+            crate::server_config_policy::remove_locked_options(&mut config2.options);
             allow_err!(
                 stream
                     .send(&Data::SyncConfig(Some(
-                        (Config::get(), Config2::get()).into()
+                        (Config::get(), config2).into()
                     )))
                     .await
             );
@@ -1832,16 +1839,21 @@ pub async fn get_rendezvous_server(ms_timeout: u64) -> (String, Vec<String>) {
 async fn get_options_(ms_timeout: u64) -> ResultType<HashMap<String, String>> {
     let mut c = connect(ms_timeout, "").await?;
     c.send(&Data::Options(None)).await?;
-    if let Some(Data::Options(Some(value))) = c.next_timeout(ms_timeout).await? {
+    if let Some(Data::Options(Some(mut value))) = c.next_timeout(ms_timeout).await? {
+        crate::server_config_policy::remove_locked_options(&mut value);
         Config::set_options(value.clone());
         Ok(value)
     } else {
-        Ok(Config::get_options())
+        let mut value = Config::get_options();
+        crate::server_config_policy::remove_locked_options(&mut value);
+        Ok(value)
     }
 }
 
 pub async fn get_options_async() -> HashMap<String, String> {
-    get_options_(1000).await.unwrap_or(Config::get_options())
+    let mut options = get_options_(1000).await.unwrap_or_else(|_| Config::get_options());
+    crate::server_config_policy::remove_locked_options(&mut options);
+    options
 }
 
 #[tokio::main(flavor = "current_thread")]
@@ -1858,6 +1870,9 @@ pub async fn get_option_async(key: &str) -> String {
 }
 
 pub fn set_option(key: &str, value: &str) {
+    if crate::server_config_policy::is_locked_option(key) {
+        return;
+    }
     let mut options = get_options();
     if value.is_empty() {
         options.remove(key);
@@ -1868,7 +1883,8 @@ pub fn set_option(key: &str, value: &str) {
 }
 
 #[tokio::main(flavor = "current_thread")]
-pub async fn set_options(value: HashMap<String, String>) -> ResultType<()> {
+pub async fn set_options(mut value: HashMap<String, String>) -> ResultType<()> {
+    crate::server_config_policy::remove_locked_options(&mut value);
     let _nat = CheckTestNatType::new();
     if let Ok(mut c) = connect(1000, "").await {
         c.send(&Data::Options(Some(value.clone()))).await?;

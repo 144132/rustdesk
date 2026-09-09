@@ -261,7 +261,7 @@ impl UI {
     }
 
     fn get_option(&self, key: String) -> String {
-        get_option(key)
+        get_option_for_client(key)
     }
 
     fn get_local_option(&self, key: String) -> String {
@@ -714,7 +714,7 @@ impl UI {
     }
 
     fn get_builtin_option(&self, key: String) -> String {
-        crate::ui_interface::get_builtin_option(&key)
+        crate::ui_interface::get_builtin_option_for_client(&key)
     }
 
     fn is_remote_modify_enabled_by_control_permissions(&self) -> String {

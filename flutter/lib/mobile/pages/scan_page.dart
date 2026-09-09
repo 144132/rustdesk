@@ -8,6 +8,7 @@ import 'package:qr_code_scanner/qr_code_scanner.dart';
 import 'package:zxing2/qrcode.dart';
 
 import '../../common.dart';
+import '../../consts.dart';
 import '../../models/platform_model.dart';
 import '../widgets/dialog.dart';
 
@@ -147,6 +148,7 @@ class _ScanPageState extends State<ScanPage> {
   }
 
   void showServerSettingFromQr(String data) async {
+    if (kServerConfigLocked) return;
     closeConnection();
     await controller?.pauseCamera();
     if (!data.startsWith('config=')) {

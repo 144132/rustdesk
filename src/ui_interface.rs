@@ -137,17 +137,6 @@ pub fn show_run_without_install() -> bool {
 
 #[inline]
 pub fn get_license() -> String {
-    #[cfg(windows)]
-    if let Ok(lic) = crate::platform::windows::get_license_from_exe_name() {
-        #[cfg(feature = "flutter")]
-        return format!("Key: {}\nHost: {}\nAPI: {}", lic.key, lic.host, lic.api);
-        // default license format is html formed (sciter)
-        #[cfg(not(feature = "flutter"))]
-        return format!(
-            "<br /> Key: {} <br /> Host: {} API: {}",
-            lic.key, lic.host, lic.api
-        );
-    }
     Default::default()
 }
 
@@ -161,6 +150,9 @@ pub fn refresh_options() {
 
 #[inline]
 pub fn get_option<T: AsRef<str>>(key: T) -> String {
+    if crate::server_config_policy::is_locked_option(key.as_ref()) {
+        return Config::get_option(key.as_ref());
+    }
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         let map = OPTIONS.lock().unwrap();
@@ -174,6 +166,14 @@ pub fn get_option<T: AsRef<str>>(key: T) -> String {
     {
         Config::get_option(key.as_ref())
     }
+}
+
+#[inline]
+pub fn get_option_for_client<T: AsRef<str>>(key: T) -> String {
+    if crate::server_config_policy::is_locked_option(key.as_ref()) {
+        return String::new();
+    }
+    get_option(key)
 }
 
 #[inline]
@@ -239,8 +239,25 @@ pub fn get_hard_option(key: String) -> String {
 }
 
 #[inline]
+#[cfg(feature = "flutter")]
+pub fn get_hard_option_for_client(key: String) -> String {
+    if crate::server_config_policy::is_locked_option(&key) {
+        return String::new();
+    }
+    get_hard_option(key)
+}
+
+#[inline]
 pub fn get_builtin_option(key: &str) -> String {
     crate::get_builtin_option(key)
+}
+
+#[inline]
+pub fn get_builtin_option_for_client(key: &str) -> String {
+    if crate::server_config_policy::is_locked_option(key) {
+        return String::new();
+    }
+    get_builtin_option(key)
 }
 
 #[inline]
@@ -347,6 +364,9 @@ pub fn get_options() -> String {
     };
     let mut m = serde_json::Map::new();
     for (k, v) in options.iter() {
+        if crate::server_config_policy::is_locked_option(k) {
+            continue;
+        }
         m.insert(k.into(), v.to_owned().into());
     }
     serde_json::to_string(&m).unwrap_or_default()
@@ -408,7 +428,8 @@ pub fn get_sound_inputs() -> Vec<String> {
 }
 
 #[inline]
-pub fn set_options(m: HashMap<String, String>) {
+pub fn set_options(mut m: HashMap<String, String>) {
+    crate::server_config_policy::remove_locked_options(&mut m);
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     {
         *OPTIONS.lock().unwrap() = m.clone();
@@ -420,6 +441,9 @@ pub fn set_options(m: HashMap<String, String>) {
 
 #[inline]
 pub fn set_option(key: String, value: String) {
+    if crate::server_config_policy::is_locked_option(&key) {
+        return;
+    }
     if &key == "stop-service" {
         #[cfg(target_os = "macos")]
         {
@@ -1375,7 +1399,8 @@ async fn check_connect_status_(reconnect: bool, rx: mpsc::UnboundedReceiver<ipc:
                                 mouse_time = v;
                                 UI_STATUS.lock().unwrap().mouse_time = v;
                             }
-                            Ok(Some(ipc::Data::Options(Some(v)))) => {
+                            Ok(Some(ipc::Data::Options(Some(mut v)))) => {
+                                crate::server_config_policy::remove_locked_options(&mut v);
                                 *OPTIONS.lock().unwrap() = v;
                                 *OPTION_SYNCED.lock().unwrap() = true;
                             }

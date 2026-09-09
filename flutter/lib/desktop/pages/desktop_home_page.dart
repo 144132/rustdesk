@@ -9,6 +9,7 @@ import 'package:flutter_hbb/common.dart';
 import 'package:flutter_hbb/common/widgets/animated_rotation_widget.dart';
 import 'package:flutter_hbb/common/widgets/custom_password.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/desktop/desktop_access_policy.dart';
 import 'package:flutter_hbb/desktop/pages/connection_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_setting_page.dart';
 import 'package:flutter_hbb/desktop/pages/desktop_tab_page.dart';
@@ -49,6 +50,8 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   var watchIsCanRecordAudio = false;
   Timer? _updateTimer;
   bool isCardClosed = false;
+  final RxString _deviceName = ''.obs;
+  bool _deviceNameSaving = false;
 
   final RxBool _editHover = false.obs;
   final RxBool _block = false.obs;
@@ -91,6 +94,7 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       ),
       buildTip(context),
       if (!isOutgoingOnly) buildIDBoard(context),
+      if (isWindows && !isOutgoingOnly) buildDeviceNameBoard(context),
       if (!isOutgoingOnly) buildPasswordBoard(context),
       FutureBuilder<Widget>(
         future: Future.value(
@@ -251,6 +255,170 @@ class _DesktopHomePageState extends State<DesktopHomePage>
         ],
       ),
     );
+  }
+
+  Widget buildDeviceNameBoard(BuildContext context) {
+    final textColor = Theme.of(context).textTheme.titleLarge?.color;
+    final canEdit = !bind.isDisableSettings() &&
+        !isOptionFixed(kOptionPresetDeviceName);
+    final editHover = false.obs;
+    return Container(
+      margin: const EdgeInsets.only(left: 20, right: 16, top: 2, bottom: 4),
+      child: Row(
+        crossAxisAlignment: CrossAxisAlignment.center,
+        children: [
+          Container(
+            width: 2,
+            height: 38,
+            decoration: const BoxDecoration(color: MyTheme.accent),
+          ),
+          Expanded(
+            child: Padding(
+              padding: const EdgeInsets.only(left: 7),
+              child: Row(
+                children: [
+                  Expanded(
+                    child: Obx(
+                      () => Column(
+                        crossAxisAlignment: CrossAxisAlignment.start,
+                        children: [
+                          Text(
+                            '设备名称',
+                            style: TextStyle(
+                              fontSize: 14,
+                              color: textColor?.withOpacity(0.5),
+                            ),
+                          ),
+                          Text(
+                            homeDeviceNameLabel(_deviceName.value),
+                            maxLines: 1,
+                            overflow: TextOverflow.ellipsis,
+                            style: const TextStyle(fontSize: 15),
+                          ),
+                        ],
+                      ),
+                    ),
+                  ),
+                  if (canEdit)
+                    InkWell(
+                      onTap: _editDeviceName,
+                      onHover: (value) => editHover.value = value,
+                      child: Tooltip(
+                        message: '修改设备名称',
+                        child: Obx(
+                          () => Icon(
+                            Icons.edit,
+                            size: 20,
+                            color: editHover.value
+                                ? textColor
+                                : const Color(0xFFDDDDDD),
+                          ),
+                        ),
+                      ),
+                    ).marginOnly(right: 8),
+                ],
+              ),
+            ),
+          ),
+        ],
+      ),
+    );
+  }
+
+  Future<void> _editDeviceName() async {
+    if (_deviceNameSaving) {
+      return;
+    }
+    _deviceNameSaving = true;
+    try {
+      if (!await requestWindowsSettingsPassword()) {
+        return;
+      }
+      if (!mounted) {
+        return;
+      }
+      await _showDeviceNameEditor();
+    } finally {
+      _deviceNameSaving = false;
+    }
+  }
+
+  Future<void> _showDeviceNameEditor() async {
+    final controller = TextEditingController(text: _deviceName.value);
+    var errorText = '';
+    var saving = false;
+    String? savedName;
+    try {
+      await gFFI.dialogManager.show<bool>((setState, close, context) {
+        Future<void> submit() async {
+          if (saving) {
+            return;
+          }
+          final value = controller.text.trim();
+          if (!isValidWindowsDeviceName(value)) {
+            setState(() => errorText = value.isEmpty
+                ? '设备名称不能为空'
+                : '设备名称不能超过 $kWindowsDeviceNameMaxLength 个字符');
+            return;
+          }
+
+          setState(() {
+            saving = true;
+            errorText = '';
+          });
+          try {
+            await bind.mainSetOption(
+                key: kOptionPresetDeviceName, value: value);
+            savedName = value;
+            close(true);
+          } catch (e) {
+            debugPrint('Failed to save device name: $e');
+            setState(() {
+              saving = false;
+              errorText = '保存失败，请重试';
+            });
+          }
+        }
+
+        return CustomAlertDialog(
+          title: const Text('修改设备名称'),
+          content: Column(
+            mainAxisSize: MainAxisSize.min,
+            crossAxisAlignment: CrossAxisAlignment.start,
+            children: [
+              const Text('远程连接时，对方可以看到这个名称。'),
+              TextField(
+                controller: controller,
+                autofocus: true,
+                maxLength: kWindowsDeviceNameMaxLength,
+                decoration: InputDecoration(
+                  labelText: '设备名称',
+                  hintText: '请输入设备名称',
+                  errorText: errorText.isEmpty ? null : errorText,
+                ),
+                onChanged: (_) {
+                  if (errorText.isNotEmpty) {
+                    setState(() => errorText = '');
+                  }
+                },
+              ).workaroundFreezeLinuxMint(),
+            ],
+          ),
+          actions: [
+            dialogButton('取消', onPressed: close, isOutline: true),
+            dialogButton('确定', onPressed: saving ? null : submit),
+          ],
+          onSubmit: submit,
+          onCancel: close,
+        );
+      });
+      final value = savedName;
+      if (value != null && mounted) {
+        _deviceName.value = value;
+      }
+    } finally {
+      controller.dispose();
+    }
   }
 
   Widget buildPopupMenu(BuildContext context) {
@@ -690,7 +858,16 @@ class _DesktopHomePageState extends State<DesktopHomePage>
   @override
   void initState() {
     super.initState();
+    if (isWindows) {
+      _deviceName.value = _readDeviceName();
+    }
     _updateTimer = periodic_immediate(const Duration(seconds: 1), () async {
+      if (isWindows) {
+        final currentDeviceName = _readDeviceName();
+        if (_deviceName.value != currentDeviceName) {
+          _deviceName.value = currentDeviceName;
+        }
+      }
       await gFFI.serverModel.fetchID();
       final error = await bind.mainGetError();
       if (systemError != error) {
@@ -844,6 +1021,14 @@ class _DesktopHomePageState extends State<DesktopHomePage>
       });
     }
     WidgetsBinding.instance.addObserver(this);
+  }
+
+  String _readDeviceName() {
+    try {
+      return bind.mainGetOptionSync(key: kOptionPresetDeviceName);
+    } catch (_) {
+      return _deviceName.value;
+    }
   }
 
   _updateWindowSize() {

@@ -1583,6 +1583,15 @@ fn get_after_install(
     ", create_service=get_create_service(&exe))
 }
 
+fn get_install_command_tail(
+    import_config: &str,
+    after_install: &str,
+    install_remote_printer: &str,
+    sleep: &str,
+) -> String {
+    format!("{import_config}\n{after_install}\n{install_remote_printer}\n{sleep}")
+}
+
 pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> ResultType<()> {
     // MSI and EXE installations use different registry layouts, so MSI-to-EXE upgrades are not supported.
     let (installed_subkey, _, _, _) = get_install_info();
@@ -1748,25 +1757,25 @@ reg add {subkey} /f /v WindowsInstaller /t REG_DWORD /d 0
 {shortcuts}
 copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
 {dels}
-{import_config}
-{after_install}
-{install_remote_printer}
-{sleep}
+{install_tail}
     ",
         display_icon = shortcut_icon_location.as_deref().unwrap_or(exe.as_str()),
         nested_exe = escape_nested_cmd_ampersands(&exe),
         version = crate::VERSION.replace("-", "."),
         build_date = crate::BUILD_DATE,
-        after_install = get_after_install(
-            &exe,
-            Some(reg_value_start_menu_shortcuts),
-            Some(reg_value_desktop_shortcuts),
-            Some(reg_value_printer)
-        ),
-        sleep = if debug { "timeout 300" } else { "" },
         dels = if debug { "" } else { &dels },
         copy_exe = copy_exe_cmd(&src_exe, &exe, &path)?,
-        import_config = get_import_config(&exe),
+        install_tail = get_install_command_tail(
+            &get_import_config(&exe),
+            &get_after_install(
+                &exe,
+                Some(reg_value_start_menu_shortcuts),
+                Some(reg_value_desktop_shortcuts),
+                Some(reg_value_printer),
+            ),
+            &install_remote_printer,
+            if debug { "timeout 300" } else { "" },
+        ),
     );
     run_cmds(cmds, debug, "install")?;
     run_after_run_cmds(silent);
@@ -4853,6 +4862,21 @@ mod tests {
                 "unsafe application name was accepted: {app_name}"
             );
         }
+    }
+
+    #[test]
+    fn first_install_imports_config_before_creating_persistent_service() {
+        let commands = get_install_command_tail(
+            "IMPORT_CONFIG",
+            "CREATE_AND_START_SERVICE",
+            "INSTALL_PRINTER",
+            "SLEEP",
+        );
+
+        assert_eq!(
+            commands,
+            "IMPORT_CONFIG\nCREATE_AND_START_SERVICE\nINSTALL_PRINTER\nSLEEP"
+        );
     }
 
     #[test]

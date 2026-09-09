@@ -951,11 +951,11 @@ pub fn main_get_http_status(url: String) -> Option<String> {
 }
 
 pub fn main_get_option(key: String) -> String {
-    get_option(key)
+    get_option_for_client(key)
 }
 
 pub fn main_get_option_sync(key: String) -> SyncReturn<String> {
-    SyncReturn(get_option(key))
+    SyncReturn(get_option_for_client(key))
 }
 
 pub fn main_get_error() -> String {
@@ -963,6 +963,9 @@ pub fn main_get_error() -> String {
 }
 
 pub fn main_set_option(key: String, value: String) {
+    if crate::server_config_policy::is_locked_option(&key) {
+        return;
+    }
     #[cfg(target_os = "android")]
     {
         let is_permission_option = key.eq(config::keys::OPTION_ENABLE_CLIPBOARD)
@@ -1032,6 +1035,7 @@ pub fn main_get_options_sync() -> SyncReturn<String> {
 
 pub fn main_set_options(json: String) {
     let mut map: HashMap<String, String> = serde_json::from_str(&json).unwrap_or(HashMap::new());
+    crate::server_config_policy::remove_locked_options(&mut map);
     #[cfg(target_os = "android")]
     {
         let allow_perm_change_in_accept_window = config::option2bool(
@@ -2581,11 +2585,11 @@ pub fn main_has_valid_bot_sync() -> SyncReturn<bool> {
 }
 
 pub fn main_get_hard_option(key: String) -> SyncReturn<String> {
-    SyncReturn(get_hard_option(key))
+    SyncReturn(get_hard_option_for_client(key))
 }
 
 pub fn main_get_buildin_option(key: String) -> SyncReturn<String> {
-    SyncReturn(get_builtin_option(&key))
+    SyncReturn(get_builtin_option_for_client(&key))
 }
 
 pub fn main_check_hwcodec() {
@@ -2999,7 +3003,7 @@ pub mod server_side {
         let mut env = env;
         let res = if let Ok(key) = env.get_string(&key) {
             let key: String = key.into();
-            super::get_builtin_option(&key)
+            super::get_builtin_option_for_client(&key)
         } else {
             "".into()
         };

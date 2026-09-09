@@ -6,6 +6,7 @@ import 'package:flutter_hbb/common/widgets/toolbar.dart';
 import 'package:get/get.dart';
 
 import '../../common.dart';
+import '../../consts.dart';
 import '../../models/platform_model.dart';
 
 void _showSuccess() {
@@ -55,6 +56,7 @@ void setTemporaryPasswordLengthDialog(
 
 void showServerSettings(OverlayDialogManager dialogManager,
     void Function(VoidCallback) setState) async {
+  if (kServerConfigLocked) return;
   Map<String, dynamic> options = {};
   try {
     options = jsonDecode(await bind.mainGetOptions());
@@ -69,6 +71,7 @@ void showServerSettingsWithValue(
     ServerConfig serverConfig,
     OverlayDialogManager dialogManager,
     void Function(VoidCallback)? upSetState) async {
+  if (kServerConfigLocked) return;
   var isInProgress = false;
   final idCtrl = TextEditingController(text: serverConfig.idServer);
   final relayCtrl = TextEditingController(text: serverConfig.relayServer);

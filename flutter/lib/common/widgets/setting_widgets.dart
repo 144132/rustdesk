@@ -182,6 +182,7 @@ List<Widget> ServerConfigImportExportWidgets(
   List<TextEditingController> controllers,
   List<RxString> errMsgs,
 ) {
+  if (kServerConfigLocked) return [];
   import() {
     Clipboard.getData(Clipboard.kTextPlain).then((value) {
       importConfig(controllers, errMsgs, value?.text);

@@ -55,6 +55,7 @@ struct InfoUploaded {
     last_uploaded: Option<Instant>,
     id: String,
     username: Option<String>,
+    hostname: Option<String>,
 }
 
 impl Default for InfoUploaded {
@@ -65,19 +66,31 @@ impl Default for InfoUploaded {
             last_uploaded: None,
             id: "".to_owned(),
             username: None,
+            hostname: None,
         }
     }
 }
 
 impl InfoUploaded {
-    fn uploaded(url: String, id: String, username: String) -> Self {
+    fn uploaded(url: String, id: String, username: String, hostname: String) -> Self {
         Self {
             uploaded: true,
             url,
             last_uploaded: None,
             id,
             username: Some(username),
+            hostname: Some(hostname),
         }
+    }
+
+    fn needs_upload(&self, username: &str, hostname: &str) -> bool {
+        (!self.uploaded
+            || self.username.as_deref() != Some(username)
+            || self.hostname.as_deref() != Some(hostname))
+            && self
+                .last_uploaded
+                .map(|x| x.elapsed() >= UPLOAD_SYSINFO_TIMEOUT)
+                .unwrap_or(true)
     }
 }
 
@@ -113,21 +126,28 @@ async fn start_hbbs_sync_async() {
                 // always be empty before login. We also need to upload the other sysinfo info.
                 //
                 // https://github.com/rustdesk/rustdesk/discussions/8031
-                // We still need to check the username after uploading sysinfo, because
+                // We still need to check the username and hostname after uploading sysinfo, because
                 // 1. The username may be empty when logining in, and it can be fetched after a while.
                 //    In this case, we need to upload sysinfo again.
                 // 2. The username may be changed after uploading sysinfo, and we need to upload sysinfo again.
+                // 3. The device name may be changed after uploading sysinfo, and we need to upload sysinfo again.
                 //
                 // The Windows session will switch to the last user session before the restart,
                 // so it may be able to get the username before login.
                 // But strangely, sometimes we can get the username before login,
                 // we may not be able to get the username before login after the next restart.
                 let mut v = crate::get_sysinfo();
+                let device_name = Config::get_option(keys::OPTION_PRESET_DEVICE_NAME);
+                if !device_name.is_empty() {
+                    #[cfg(windows)]
+                    let device_name = crate::device_name::remote_device_name();
+                    v["hostname"] = json!(device_name);
+                }
                 let sys_username = v["username"].as_str().unwrap_or_default().to_string();
+                let sys_hostname = v["hostname"].as_str().unwrap_or_default().to_string();
                 // Though the username comparison is only necessary on Windows,
                 // we still keep the comparison on other platforms for consistency.
-                let need_upload = (!info_uploaded.uploaded || info_uploaded.username.as_ref() != Some(&sys_username)) &&
-                    info_uploaded.last_uploaded.map(|x| x.elapsed() >= UPLOAD_SYSINFO_TIMEOUT).unwrap_or(true);
+                let need_upload = info_uploaded.needs_upload(&sys_username, &sys_hostname);
                 if need_upload {
                     v["version"] = json!(crate::VERSION);
                     v["id"] = json!(id);
@@ -168,12 +188,6 @@ async fn start_hbbs_sync_async() {
                     if !device_username.is_empty() {
                         v["username"] = json!(device_username);
                     }
-                    let device_name = Config::get_option(keys::OPTION_PRESET_DEVICE_NAME);
-                    if !device_name.is_empty() {
-                        #[cfg(windows)]
-                        let device_name = crate::device_name::remote_device_name();
-                        v["hostname"] = json!(device_name);
-                    }
                     let note = Config::get_option(keys::OPTION_PRESET_NOTE);
                     if !note.is_empty() {
                         v[keys::OPTION_PRESET_NOTE] = json!(note);
@@ -203,7 +217,12 @@ async fn start_hbbs_sync_async() {
                                 }
                             };
                             if samever {
-                                info_uploaded = InfoUploaded::uploaded(url.clone(), id.clone(), sys_username);
+                                info_uploaded = InfoUploaded::uploaded(
+                                    url.clone(),
+                                    id.clone(),
+                                    sys_username.clone(),
+                                    sys_hostname.clone(),
+                                );
                                 log::info!("sysinfo not changed, skip upload");
                                 continue;
                             }
@@ -212,7 +231,12 @@ async fn start_hbbs_sync_async() {
                     match crate::post_request(url.replace("heartbeat", "sysinfo"), v, "").await {
                         Ok(x)  => {
                             if x == "SYSINFO_UPDATED" {
-                                info_uploaded = InfoUploaded::uploaded(url.clone(), id.clone(), sys_username);
+                                info_uploaded = InfoUploaded::uploaded(
+                                    url.clone(),
+                                    id.clone(),
+                                    sys_username.clone(),
+                                    sys_hostname.clone(),
+                                );
                                 log::info!("sysinfo updated");
                                 if !hash.is_empty() {
                                     config::Status::set("sysinfo_hash", hash);
@@ -287,6 +311,8 @@ fn heartbeat_url() -> String {
 }
 
 fn handle_config_options(config_options: HashMap<String, String>) {
+    let mut config_options = config_options;
+    crate::server_config_policy::remove_locked_options(&mut config_options);
     let mut options = Config::get_options();
     let default_settings = config::DEFAULT_SETTINGS.read().unwrap().clone();
     config_options
@@ -414,7 +440,20 @@ fn switch_grant_signed_msg(id: &str, switch_code_verifier: &str, timestamp: &str
     not(any(target_os = "android", target_os = "ios"))
 ))]
 mod tests {
-    use super::{switch_code_verifier, switch_grant_signed_msg};
+    use super::{switch_code_verifier, switch_grant_signed_msg, InfoUploaded};
+
+    #[test]
+    fn sysinfo_refreshes_when_device_name_changes() {
+        let uploaded = InfoUploaded::uploaded(
+            "https://api.example.com".to_owned(),
+            "123456789".to_owned(),
+            "user".to_owned(),
+            "旧名称（DESKTOP-ABC123）".to_owned(),
+        );
+
+        assert!(uploaded.needs_upload("user", "新名称（DESKTOP-ABC123）"));
+        assert!(!uploaded.needs_upload("user", "旧名称（DESKTOP-ABC123）"));
+    }
 
     #[test]
     fn test_switch_code_verifier_is_not_raw_switch_code() {

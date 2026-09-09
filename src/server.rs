@@ -650,7 +650,10 @@ pub async fn start_server(is_server: bool, no_server: bool) {
                     if let Ok(Some(data)) = conn.next_timeout(1000).await {
                         match data {
                             Data::SyncConfig(Some(configs)) => {
-                                let (config, config2) = *configs;
+                                let (config, mut config2) = *configs;
+                                crate::server_config_policy::remove_locked_options(
+                                    &mut config2.options,
+                                );
                                 if Config::set(config) {
                                     log::info!("config synced");
                                 }
@@ -771,7 +774,10 @@ async fn sync_and_watch_config_dir(sync_done_tx: Option<tokio::sync::oneshot::Se
                         if let Ok(Some(data)) = conn.next_timeout(1000).await {
                             match data {
                                 Data::SyncConfig(Some(configs)) => {
-                                    let (config, config2) = *configs;
+                                    let (config, mut config2) = *configs;
+                                    crate::server_config_policy::remove_locked_options(
+                                        &mut config2.options,
+                                    );
                                     let _chk = crate::ipc::CheckIfRestart::new();
                                     #[cfg(target_os = "macos")]
                                     let _chk_pk = crate::CheckIfResendPk::new();

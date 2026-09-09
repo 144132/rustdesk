@@ -61,6 +61,7 @@ mod updater;
 mod ui_cm_interface;
 mod ui_interface;
 mod ui_session_interface;
+mod server_config_policy;
 
 mod hbbs_http;
 

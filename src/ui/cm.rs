@@ -155,11 +155,11 @@ impl SciterConnectionManager {
     }
 
     fn get_option(&self, key: String) -> String {
-        crate::ui_interface::get_option(key)
+        crate::ui_interface::get_option_for_client(key)
     }
 
     fn get_builtin_option(&self, key: String) -> String {
-        crate::ui_interface::get_builtin_option(&key)
+        crate::ui_interface::get_builtin_option_for_client(&key)
     }
 
     fn hide_cm(&self) -> bool {

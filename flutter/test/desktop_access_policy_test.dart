@@ -52,6 +52,20 @@ void main() {
     });
   });
 
+  group('home device name editor', () {
+    test('displays a saved name and a fallback when no name is set', () {
+      expect(homeDeviceNameLabel('办公室电脑'), '办公室电脑');
+      expect(homeDeviceNameLabel('   '), '未设置');
+    });
+
+    test('accepts a trimmed non-empty name up to 64 characters', () {
+      expect(isValidWindowsDeviceName('  办公室电脑  '), isTrue);
+      expect(isValidWindowsDeviceName('a' * 64), isTrue);
+      expect(isValidWindowsDeviceName('a' * 65), isFalse);
+      expect(isValidWindowsDeviceName('   '), isFalse);
+    });
+  });
+
   group('Windows uninstall password', () {
     test('accepts the configured password only', () {
       expect(isValidWindowsUninstallPassword('xinyu'), isTrue);

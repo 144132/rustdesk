@@ -6,6 +6,7 @@ import 'package:get/get.dart';
 
 const String kProductDisplayName = "新育智慧校园远程协助";
 const String kWindowsSettingsPassword = "wwwyibu";
+const bool kServerConfigLocked = true;
 
 const int kMaxVirtualDisplayCount = 4;
 const int kAllVirtualDisplay = -1;
