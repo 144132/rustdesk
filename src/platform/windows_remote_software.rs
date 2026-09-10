@@ -288,8 +288,14 @@ fn validate_detection(rule: &DetectionRule) -> Result<(), RemoteSoftwareError> {
 
 #[derive(Default)]
 struct WorkerStop {
-    stopped: Mutex<bool>,
+    state: Mutex<WorkerStopState>,
     wake: Condvar,
+}
+
+#[derive(Default)]
+struct WorkerStopState {
+    stopped: bool,
+    execution_started: bool,
 }
 
 #[cfg(any(windows, test))]
@@ -354,42 +360,58 @@ fn stop_worker_thread(
 
 impl WorkerStop {
     fn stop(&self) {
-        if let Ok(mut stopped) = self.stopped.lock() {
-            *stopped = true;
+        if let Ok(mut state) = self.state.lock() {
+            state.stopped = true;
             self.wake.notify_all();
         }
     }
 
     fn is_stopped(&self) -> bool {
-        self.stopped.lock().map(|stopped| *stopped).unwrap_or(true)
+        self.state
+            .lock()
+            .map(|state| state.stopped)
+            .unwrap_or(true)
     }
 
     fn try_begin_execution(&self) -> Option<WorkerExecutionGuard<'_>> {
-        let stopped = self.stopped.lock().ok()?;
-        if *stopped {
+        let mut state = self.state.lock().ok()?;
+        if state.stopped || state.execution_started {
             None
         } else {
-            Some(WorkerExecutionGuard { _stop: self })
+            // This assignment and the stopped check are one linearized gate
+            // operation under the same mutex used by stop().
+            state.execution_started = true;
+            drop(state);
+            Some(WorkerExecutionGuard { stop: self })
         }
     }
 
     fn wait(&self, duration: Duration) -> bool {
-        let stopped = match self.stopped.lock() {
-            Ok(stopped) => stopped,
+        let state = match self.state.lock() {
+            Ok(state) => state,
             Err(_) => return false,
         };
-        if *stopped {
+        if state.stopped {
             return false;
         }
         self.wake
-            .wait_timeout_while(stopped, duration, |stopped| !*stopped)
-            .map(|(stopped, _)| !*stopped)
+            .wait_timeout_while(state, duration, |state| !state.stopped)
+            .map(|(state, _)| !state.stopped)
             .unwrap_or(false)
     }
 }
 
 struct WorkerExecutionGuard<'a> {
-    _stop: &'a WorkerStop,
+    stop: &'a WorkerStop,
+}
+
+impl Drop for WorkerExecutionGuard<'_> {
+    fn drop(&mut self) {
+        if let Ok(mut state) = self.stop.state.lock() {
+            state.execution_started = false;
+            self.stop.wake.notify_all();
+        }
+    }
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2378,6 +2400,28 @@ mod tests {
             store.state.entries[0].last_result.as_ref().unwrap().stage,
             RemoteSoftwareStage::Queued
         );
+    }
+
+    #[test]
+    fn execution_gate_tracks_active_execution_and_stop_linearization() {
+        let stop = WorkerStop::default();
+        // The mutex acquisition that marks execution_started is the gate's
+        // linearization point: one permit owns the active execution slot.
+        let first = stop.try_begin_execution().expect("first permit must start");
+        assert!(
+            stop.try_begin_execution().is_none(),
+            "an active execution must block a second permit"
+        );
+        drop(first);
+        let second = stop
+            .try_begin_execution()
+            .expect("dropping the first permit must release the slot");
+        // A stop that wins after the permit is marked cannot revoke the
+        // already-started operation, but it must prevent any later permit.
+        stop.stop();
+        assert!(stop.try_begin_execution().is_none());
+        drop(second);
+        assert!(stop.try_begin_execution().is_none());
     }
 
     #[test]
