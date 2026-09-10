@@ -106,6 +106,107 @@ class CachedPeerData {
   }
 }
 
+enum SoftwareInstallStage {
+  queued,
+  downloading,
+  verifying,
+  downloaded,
+  detecting,
+  installing,
+  alreadyInstalled,
+  success,
+  needsReboot,
+  failed,
+}
+
+class SoftwareInstallStatus {
+  final String requestId;
+  final SoftwareInstallStage stage;
+  final String message;
+  final int? exitCode;
+  final bool needsReboot;
+  final int? progressPercent;
+
+  const SoftwareInstallStatus({
+    required this.requestId,
+    required this.stage,
+    required this.message,
+    required this.exitCode,
+    required this.needsReboot,
+    required this.progressPercent,
+  });
+
+  static SoftwareInstallStage? _stageFromName(String name) {
+    switch (name) {
+      case 'queued':
+        return SoftwareInstallStage.queued;
+      case 'downloading':
+        return SoftwareInstallStage.downloading;
+      case 'verifying':
+        return SoftwareInstallStage.verifying;
+      case 'downloaded':
+        return SoftwareInstallStage.downloaded;
+      case 'detecting':
+        return SoftwareInstallStage.detecting;
+      case 'installing':
+        return SoftwareInstallStage.installing;
+      case 'already_installed':
+        return SoftwareInstallStage.alreadyInstalled;
+      case 'success':
+        return SoftwareInstallStage.success;
+      case 'needs_reboot':
+        return SoftwareInstallStage.needsReboot;
+      case 'failed':
+        return SoftwareInstallStage.failed;
+      default:
+        return null;
+    }
+  }
+
+  static SoftwareInstallStatus? fromEvent(Map<String, dynamic> event) {
+    final requestId = event['request_id'];
+    final stageName = event['stage'];
+    final message = event['message'];
+    final needsReboot = event['needs_reboot'];
+    if (requestId is! String || requestId.trim().isEmpty ||
+        stageName is! String || message is! String || needsReboot is! bool) {
+      return null;
+    }
+    final stage = _stageFromName(stageName);
+    if (stage == null) return null;
+
+    final rawExitCode = event['exit_code'];
+    final rawProgress = event['progress_percent'];
+    final exitCode = rawExitCode == null
+        ? null
+        : rawExitCode is int
+            ? rawExitCode
+            : null;
+    final progressPercent = rawProgress == null
+        ? null
+        : rawProgress is int && rawProgress >= 0 && rawProgress <= 100
+            ? rawProgress
+            : null;
+    if (rawExitCode != null && exitCode == null) return null;
+    if (rawProgress != null && progressPercent == null) return null;
+    return SoftwareInstallStatus(
+      requestId: requestId,
+      stage: stage,
+      message: message,
+      exitCode: exitCode,
+      needsReboot: needsReboot,
+      progressPercent: progressPercent,
+    );
+  }
+
+  bool get isTerminal => const {
+        SoftwareInstallStage.alreadyInstalled,
+        SoftwareInstallStage.success,
+        SoftwareInstallStage.needsReboot,
+        SoftwareInstallStage.failed,
+      }.contains(stage);
+}
+
 class FfiModel with ChangeNotifier {
   CachedPeerData cachedPeerData = CachedPeerData();
   PeerInfo _pi = PeerInfo();
@@ -128,6 +229,8 @@ class FfiModel with ChangeNotifier {
   bool _androidDocumentPickerInterruptedConnection = false;
   bool _viewOnly = false;
   bool _showMyCursor = false;
+  String? _softwareInstallRequestId;
+  SoftwareInstallStatus? _softwareInstallStatus;
   WeakReference<FFI> parent;
   late final SessionID sessionId;
 
@@ -157,6 +260,43 @@ class FfiModel with ChangeNotifier {
   bool? get direct => _direct;
 
   PeerInfo get pi => _pi;
+
+  String? get softwareInstallRequestId => _softwareInstallRequestId;
+  SoftwareInstallStatus? get softwareInstallStatus => _softwareInstallStatus;
+  bool get softwareInstallBusy =>
+      _softwareInstallRequestId != null &&
+      !(_softwareInstallStatus?.isTerminal ?? false);
+
+  void beginSoftwareInstall(String requestId) {
+    if (requestId.trim().isEmpty) return;
+    _softwareInstallRequestId = requestId;
+    _softwareInstallStatus = null;
+    notifyListeners();
+  }
+
+  void markSoftwareInstallFailure(String requestId, String message) {
+    if (requestId.trim().isEmpty) return;
+    handleSoftwareInstallStatus({
+      'request_id': requestId,
+      'stage': 'failed',
+      'message': message,
+      'exit_code': null,
+      'needs_reboot': false,
+      'progress_percent': null,
+    });
+  }
+
+  void handleSoftwareInstallStatus(Map<String, dynamic> event) {
+    final status = SoftwareInstallStatus.fromEvent(event);
+    if (status == null) return;
+    if (_softwareInstallRequestId != null &&
+        _softwareInstallRequestId != status.requestId) {
+      return;
+    }
+    _softwareInstallRequestId = status.requestId;
+    _softwareInstallStatus = status;
+    notifyListeners();
+  }
 
   bool get inputBlocked => _inputBlocked;
 
@@ -255,6 +395,8 @@ class FfiModel with ChangeNotifier {
     _secure = null;
     _direct = null;
     _inputBlocked = false;
+    _softwareInstallRequestId = null;
+    _softwareInstallStatus = null;
     _timer?.cancel();
     _timer = null;
     _androidDocumentPickerActive = false;
@@ -367,6 +509,8 @@ class FfiModel with ChangeNotifier {
         Clipboard.setData(ClipboardData(text: evt['content']));
       } else if (name == 'permission') {
         updatePermission(evt, peerId);
+      } else if (name == 'software_install_status') {
+        handleSoftwareInstallStatus(evt);
       } else if (name == 'chat_client_mode') {
         parent.target?.chatModel
             .receive(ChatModel.clientModeID, evt['text'] ?? '');
@@ -1458,6 +1602,7 @@ class FfiModel with ChangeNotifier {
       }
       Map<String, dynamic> features = json.decode(evt['features']);
       _pi.features.privacyMode = features['privacy_mode'] == true;
+      _pi.features.softwareInstall = features['software_install'] == true;
       if (!isCache) {
         handleResolutions(peerId, evt["resolutions"]);
       }
@@ -4185,6 +4330,7 @@ class Resolution {
 
 class Features {
   bool privacyMode = false;
+  bool softwareInstall = false;
 }
 
 const kInvalidDisplayIndex = -1;

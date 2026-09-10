@@ -700,6 +700,9 @@ class _RemotePageState extends State<RemotePage>
           id: widget.id,
           ffi: _ffi,
           state: widget.toolbarState,
+          // Keep the local desktop platform as an explicit gate in addition
+          // to the remote Windows platform/capability/permission checks.
+          localWindowsGate: isWindows,
           onEnterOrLeaveImageSetter: (id, func) {
             _instanceIdOnEnterOrLeaveImage4Toolbar = id;
             _onEnterOrLeaveImage4Toolbar = func;

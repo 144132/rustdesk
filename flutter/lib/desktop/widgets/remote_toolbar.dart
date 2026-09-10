@@ -15,6 +15,7 @@ import 'package:provider/provider.dart';
 import 'package:debounce_throttle/debounce_throttle.dart';
 import 'package:desktop_multi_window/desktop_multi_window.dart';
 import 'package:window_size/window_size.dart' as window_size;
+import 'package:uuid/uuid.dart';
 
 import '../../common.dart';
 import '../../models/model.dart';
@@ -22,6 +23,7 @@ import '../../models/platform_model.dart';
 import '../../common/shared_state.dart';
 import './popup_menu.dart';
 import './kb_layout_type_chooser.dart';
+import './remote_software_install_dialog.dart';
 import 'package:flutter_hbb/utils/scale.dart';
 import 'package:flutter_hbb/common/widgets/custom_scale_base.dart';
 
@@ -443,6 +445,7 @@ class RemoteToolbar extends StatefulWidget {
   final Function(int, Function(bool)) onEnterOrLeaveImageSetter;
   final Function(int) onEnterOrLeaveImageCleaner;
   final Function(VoidCallback) setRemoteState;
+  final bool? localWindowsGate;
 
   RemoteToolbar({
     Key? key,
@@ -452,6 +455,7 @@ class RemoteToolbar extends StatefulWidget {
     required this.onEnterOrLeaveImageSetter,
     required this.onEnterOrLeaveImageCleaner,
     required this.setRemoteState,
+    this.localWindowsGate,
   }) : super(key: key);
 
   @override
@@ -835,6 +839,12 @@ class _RemoteToolbarState extends State<RemoteToolbar> {
 
     toolbarItems
         .add(_ControlMenu(id: widget.id, ffi: widget.ffi, state: widget.state));
+    if (widget.ffi.connType == ConnType.defaultConn) {
+      toolbarItems.add(_SoftwareInstallMenu(
+        ffi: widget.ffi,
+        localWindowsGate: widget.localWindowsGate ?? isWindows,
+      ));
+    }
     toolbarItems.add(_DisplayMenu(
       id: widget.id,
       ffi: widget.ffi,
@@ -948,6 +958,227 @@ class _PinMenu extends StatelessWidget {
             ? _ToolbarTheme.hoverBlueColor
             : _ToolbarTheme.hoverInactiveColor,
       ),
+    );
+  }
+}
+
+class _SoftwareInstallMenu extends StatelessWidget {
+  final FFI ffi;
+  final bool localWindowsGate;
+
+  const _SoftwareInstallMenu({
+    required this.ffi,
+    required this.localWindowsGate,
+  });
+
+  bool get _visible {
+    final model = ffi.ffiModel;
+    return localWindowsGate &&
+        model.pi.platform == kPeerPlatformWindows &&
+        shouldShowRemoteSoftwareInstall(
+            model.pi.features.softwareInstall,
+            model.permissions['software_install'] == true);
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: ffi.ffiModel,
+      builder: (context, _) {
+        if (!_visible) return const Offstage();
+        final busy = ffi.ffiModel.softwareInstallBusy;
+        return _IconMenuButton(
+          icon: Icon(
+            Icons.install_desktop_outlined,
+            color: Colors.white,
+            size: _ToolbarTheme.buttonSize,
+          ),
+          tooltip: busy ? '查看远程安装状态' : '远程安装',
+          onPressed: () => _open(context),
+          color: busy ? _ToolbarTheme.hoverBlueColor : _ToolbarTheme.blueColor,
+          hoverColor: _ToolbarTheme.hoverBlueColor,
+        );
+      },
+    );
+  }
+
+  Future<void> _open(BuildContext context) async {
+    if (!_visible) return;
+    if (ffi.ffiModel.softwareInstallBusy) {
+      await _showStatus(context);
+      return;
+    }
+
+    RemoteSoftwareInstallForm? submittedForm;
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (dialogContext) => RemoteSoftwareInstallDialog(
+        onSubmit: (form) {
+          submittedForm = form;
+          Navigator.of(dialogContext).pop();
+        },
+        onCancel: () => Navigator.of(dialogContext).pop(),
+      ),
+    );
+    if (submittedForm == null || !_visible) return;
+
+    final requestId = Uuid().v4();
+    final manifestJson = jsonEncode(
+        _correctedRemoteSoftwareManifest(submittedForm!, requestId));
+    ffi.ffiModel.beginSoftwareInstall(requestId);
+    try {
+      final dynamic bridge = bind;
+      await bridge.sessionSoftwareInstall(
+          sessionId: ffi.sessionId, manifestJson: manifestJson);
+    } catch (error) {
+      ffi.ffiModel.markSoftwareInstallFailure(requestId, '发送失败：$error');
+    }
+    if (context.mounted) await _showStatus(context);
+  }
+
+  Future<void> _showStatus(BuildContext context) async {
+    await showDialog<void>(
+      context: context,
+      barrierDismissible: false,
+      builder: (_) => _SoftwareInstallStatusDialog(ffi: ffi),
+    );
+  }
+}
+
+/// Converts both the current Task 5A form DTO and its corrected future `toJson`
+/// shape into the strict RemoteSoftwareManifest JSON consumed by Rust FFI.
+Map<String, dynamic> _correctedRemoteSoftwareManifest(
+    RemoteSoftwareInstallForm form, String requestId) {
+  final source = Map<String, dynamic>.from(form.toJson(requestId: requestId));
+  final detectionRule = source['detection_rule'];
+  final Map<String, dynamic> correctedDetection;
+  if (detectionRule is Map) {
+    correctedDetection = Map<String, dynamic>.from(detectionRule);
+  } else {
+    final detectionType = source['detection_type'];
+    final detectionValue = source['detection_value'];
+    final key = switch (detectionType) {
+      'msi_product_code' => 'msi_product_code',
+      'uninstall_display_name' => 'uninstall_display_name',
+      'exe_path' => 'exe_path',
+      _ => throw const FormatException('unknown detection type'),
+    };
+    if (detectionValue is! String) {
+      throw const FormatException('detection value must be a string');
+    }
+    correctedDetection = <String, dynamic>{key: detectionValue};
+  }
+  if (correctedDetection.length != 1 ||
+      correctedDetection.keys.any((key) =>
+          !const {'msi_product_code', 'uninstall_display_name', 'exe_path'}
+              .contains(key))) {
+    throw const FormatException('detection_rule must have one known tag');
+  }
+
+  final corrected = <String, dynamic>{
+    'request_id': source['request_id'] is String &&
+            (source['request_id'] as String).trim().isNotEmpty
+        ? source['request_id']
+        : requestId,
+    'software_name': source['software_name'],
+    'package_url': source['package_url'],
+    'sha256': source['sha256'],
+    'installer_type': source['installer_type'],
+    'detection_rule': correctedDetection,
+    'silent_args': source['silent_args'],
+    'mode': source['mode'],
+  };
+  return corrected;
+}
+
+class _SoftwareInstallStatusDialog extends StatelessWidget {
+  final FFI ffi;
+
+  const _SoftwareInstallStatusDialog({required this.ffi});
+
+  static String _stageLabel(SoftwareInstallStage stage) {
+    switch (stage) {
+      case SoftwareInstallStage.queued:
+        return '排队中';
+      case SoftwareInstallStage.downloading:
+        return '下载中';
+      case SoftwareInstallStage.verifying:
+        return '校验中';
+      case SoftwareInstallStage.downloaded:
+        return '已下载';
+      case SoftwareInstallStage.detecting:
+        return '检测中';
+      case SoftwareInstallStage.installing:
+        return '安装中';
+      case SoftwareInstallStage.alreadyInstalled:
+        return '已安装';
+      case SoftwareInstallStage.success:
+        return '安装成功';
+      case SoftwareInstallStage.needsReboot:
+        return '需要重启';
+      case SoftwareInstallStage.failed:
+        return '失败';
+    }
+  }
+
+  Future<void> _cancel(BuildContext context) async {
+    final requestId = ffi.ffiModel.softwareInstallRequestId;
+    if (requestId != null && ffi.ffiModel.softwareInstallBusy) {
+      try {
+        final dynamic bridge = bind;
+        await bridge.sessionSoftwareInstallCancel(
+            sessionId: ffi.sessionId, requestId: requestId);
+      } catch (error) {
+        debugPrint('Failed to cancel remote software install: $error');
+      }
+    }
+    if (context.mounted) Navigator.of(context).pop();
+  }
+
+  @override
+  Widget build(BuildContext context) {
+    return AnimatedBuilder(
+      animation: ffi.ffiModel,
+      builder: (context, _) {
+        final status = ffi.ffiModel.softwareInstallStatus;
+        final busy = ffi.ffiModel.softwareInstallBusy;
+        return AlertDialog(
+          title: const Text('远程安装状态'),
+          content: status == null
+              ? const Text('正在提交安装请求…')
+              : Column(
+                  mainAxisSize: MainAxisSize.min,
+                  crossAxisAlignment: CrossAxisAlignment.start,
+                  children: [
+                    Text(_stageLabel(status.stage)),
+                    if (status.message.isNotEmpty) ...[
+                      const SizedBox(height: 8),
+                      Text(status.message),
+                    ],
+                    if (status.progressPercent != null) ...[
+                      const SizedBox(height: 12),
+                      LinearProgressIndicator(
+                          value: status.progressPercent! / 100),
+                      const SizedBox(height: 4),
+                      Text('${status.progressPercent}%'),
+                    ],
+                    if (status.exitCode != null)
+                      Text('退出码：${status.exitCode}'),
+                    if (status.needsReboot)
+                      const Text('目标设备需要重启才能完成。'),
+                  ],
+                ),
+          actions: [
+            TextButton(
+              onPressed: busy
+                  ? () => _cancel(context)
+                  : () => Navigator.of(context).pop(),
+              child: Text(busy ? '取消' : '关闭'),
+            ),
+          ],
+        );
+      },
     );
   }
 }
