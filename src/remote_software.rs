@@ -264,6 +264,13 @@ fn hex_value(byte: u8) -> u8 {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use hbb_common::{
+        message_proto::{
+            SoftwareDetectionType, SoftwareInstallAction, SoftwareInstallMode,
+            SoftwareInstallRequest, SoftwareInstallStage, SoftwareInstallerType,
+        },
+        protobuf::Message as _,
+    };
     use std::time::Duration;
 
     fn test_manifest(package_url: &str) -> RemoteSoftwareManifest {
@@ -277,6 +284,74 @@ mod tests {
             silent_args: Vec::new(),
             mode: InstallMode::DownloadAndInstall,
         }
+    }
+
+    fn test_install_request() -> SoftwareInstallRequest {
+        SoftwareInstallRequest {
+            request_id: "request-1".into(),
+            software_name: "Example".into(),
+            package_url: "https://update.szxinyu.com/app.exe".into(),
+            sha256: "00".repeat(32),
+            installer_type: SoftwareInstallerType::Exe.into(),
+            detection_type: SoftwareDetectionType::ExePath.into(),
+            detection_value: r"C:\Program Files\Example\Example.exe".into(),
+            silent_args: vec!["/S".into()],
+            mode: SoftwareInstallMode::DownloadAndInstall.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn software_install_request_round_trips_without_shell_command_fields() {
+        let request = test_install_request();
+        let mut action = SoftwareInstallAction::new();
+        action.set_request(request.clone());
+        let mut message = hbb_common::message_proto::Message::new();
+        message.set_software_install_action(action);
+
+        let bytes = message.write_to_bytes().unwrap();
+        let decoded = hbb_common::message_proto::Message::parse_from_bytes(&bytes).unwrap();
+        let decoded = decoded.software_install_action().request();
+        assert_eq!(decoded.request_id, request.request_id);
+        assert_eq!(decoded.silent_args, vec!["/S"]);
+        assert!(decoded.silent_args.len() < 16);
+    }
+
+    #[test]
+    fn legacy_features_do_not_advertise_software_install() {
+        let mut current = hbb_common::message_proto::Features::new();
+        assert!(!crate::client::software_install_feature_supported(None));
+        assert!(!crate::client::software_install_feature_supported(Some(
+            &current
+        )));
+        current.software_install = true;
+        assert!(crate::client::software_install_feature_supported(Some(
+            &current
+        )));
+    }
+
+    #[test]
+    fn software_install_stages_have_stable_flutter_names() {
+        assert_eq!(
+            crate::client::software_install_stage_name(SoftwareInstallStage::Queued.into()),
+            "queued"
+        );
+        assert_eq!(
+            crate::client::software_install_stage_name(
+                SoftwareInstallStage::AlreadyInstalled.into()
+            ),
+            "already_installed"
+        );
+        assert_eq!(
+            crate::client::software_install_stage_name(SoftwareInstallStage::NeedsReboot.into()),
+            "needs_reboot"
+        );
+        assert_eq!(
+            crate::client::software_install_stage_name(
+                SoftwareInstallStage::UnknownInstallStage.into()
+            ),
+            "unknown"
+        );
     }
 
     #[test]

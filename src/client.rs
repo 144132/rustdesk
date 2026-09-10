@@ -102,6 +102,28 @@ const RESTART_REMOTE_DEVICE_GRACE: Duration = Duration::from_secs(5 * 60);
 pub const VIDEO_QUEUE_SIZE: usize = 120;
 const MAX_DECODE_FAIL_COUNTER: usize = 3;
 
+pub fn software_install_feature_supported(features: Option<&Features>) -> bool {
+    features.is_some_and(|features| features.software_install)
+}
+
+pub fn software_install_stage_name(
+    stage: hbb_common::protobuf::EnumOrUnknown<SoftwareInstallStage>,
+) -> &'static str {
+    match stage.enum_value() {
+        Ok(SoftwareInstallStage::Queued) => "queued",
+        Ok(SoftwareInstallStage::Downloading) => "downloading",
+        Ok(SoftwareInstallStage::Verifying) => "verifying",
+        Ok(SoftwareInstallStage::Downloaded) => "downloaded",
+        Ok(SoftwareInstallStage::Detecting) => "detecting",
+        Ok(SoftwareInstallStage::Installing) => "installing",
+        Ok(SoftwareInstallStage::AlreadyInstalled) => "already_installed",
+        Ok(SoftwareInstallStage::Success) => "success",
+        Ok(SoftwareInstallStage::NeedsReboot) => "needs_reboot",
+        Ok(SoftwareInstallStage::Failed) => "failed",
+        Ok(SoftwareInstallStage::UnknownInstallStage) | Err(_) => "unknown",
+    }
+}
+
 pub const LOGIN_MSG_PASSWORD_EMPTY: &str = "Empty Password";
 pub const LOGIN_MSG_PASSWORD_WRONG: &str = "Wrong Password";
 pub const LOGIN_MSG_2FA_WRONG: &str = "Wrong 2FA Code";

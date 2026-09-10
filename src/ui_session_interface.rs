@@ -1742,6 +1742,7 @@ pub trait InvokeUiSession: Send + Sync + Clone + 'static + Sized + Default {
     fn printer_request(&self, id: i32, path: String);
     fn handle_screenshot_resp(&self, sid: String, msg: String);
     fn handle_terminal_response(&self, response: TerminalResponse);
+    fn handle_software_install_status(&self, _status: SoftwareInstallStatus) {}
 }
 
 impl<T: InvokeUiSession> Deref for Session<T> {

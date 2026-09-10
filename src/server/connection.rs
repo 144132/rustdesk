@@ -1933,12 +1933,25 @@ impl Connection {
         {
             terminal = terminal && portable_pty::win::check_support().is_ok();
         }
+        #[cfg(target_os = "windows")]
+        let software_install = software_install_capability(
+            self.is_remote(),
+            Config::get_bool_option(keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL),
+            Self::permission(
+                keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
+                &self.control_permissions,
+            ),
+            crate::platform::windows::is_self_service_running(),
+        );
+        #[cfg(not(target_os = "windows"))]
+        let software_install = false;
         pi.username = username;
         pi.sas_enabled = sas_enabled;
         pi.features = Some(Features {
             privacy_mode: privacy_mode::is_privacy_mode_supported(),
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             terminal,
+            software_install,
             ..Default::default()
         })
         .into();
@@ -2526,6 +2539,7 @@ impl Connection {
                 keys::OPTION_ENABLE_RECORD_SESSION => Some(Permission::recording),
                 keys::OPTION_ENABLE_BLOCK_INPUT => Some(Permission::block_input),
                 keys::OPTION_ENABLE_PRIVACY_MODE => Some(Permission::privacy_mode),
+                keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL => Some(Permission::software_install),
                 _ => None,
             };
             if let Some(permission) = permission {
@@ -5944,6 +5958,8 @@ impl Connection {
             Some(message::Union::TerminalAction(_)) => "terminal_action",
             Some(message::Union::TerminalResponse(_)) => "terminal_response",
             Some(message::Union::PortForwardChannel(_)) => "port_forward_channel",
+            Some(message::Union::SoftwareInstallAction(_)) => "software_install_action",
+            Some(message::Union::SoftwareInstallStatus(_)) => "software_install_status",
             Some(message::Union::Misc(misc)) => Self::misc_message_family(misc),
             Some(_) => "message.other",
             None => "empty",
@@ -6092,6 +6108,15 @@ impl Connection {
 
         Ok(())
     }
+}
+
+fn software_install_capability(
+    is_remote: bool,
+    policy_enabled: bool,
+    permission_enabled: bool,
+    service_running: bool,
+) -> bool {
+    is_remote && policy_enabled && permission_enabled && service_running
 }
 
 #[cfg(feature = "flutter")]
@@ -7216,6 +7241,71 @@ mod test {
 
     fn set_supported_decoding(option: &mut OptionMessage) {
         option.supported_decoding = hbb_common::protobuf::MessageField::some(Default::default());
+    }
+
+    fn software_install_message() -> Message {
+        msg(|message| message.set_software_install_action(SoftwareInstallAction::new()))
+    }
+
+    #[test]
+    fn software_install_is_allowed_only_on_remote_scoped_connections() {
+        let message = software_install_message();
+        assert_eq!(Connection::message_family(&message), "software_install_action");
+        assert_eq!(
+            Connection::authorized_message_scope_violation(AuthConnType::Remote, &message),
+            None
+        );
+        for connection_type in [
+            AuthConnType::FileTransfer,
+            AuthConnType::Terminal,
+            AuthConnType::PortForward,
+            AuthConnType::ViewCamera,
+        ] {
+            assert_eq!(
+                Connection::authorized_message_scope_violation(connection_type, &message),
+                Some("software_install_action")
+            );
+        }
+        assert!(!Connection::is_file_transfer_scoped_message(&message));
+        assert!(!Connection::is_terminal_scoped_message(&message));
+        assert!(!Connection::is_port_forward_scoped_message(&message));
+        assert!(!Connection::is_view_camera_scoped_message(&message));
+    }
+
+    #[test]
+    fn software_install_uses_an_independent_control_permission() {
+        use hbb_common::{
+            protobuf::Enum,
+            rendezvous_proto::control_permissions::Permission,
+        };
+
+        let shift = Permission::software_install.value() * 2;
+        let enabled = Some(ControlPermissions {
+            permissions: 0b10 << shift,
+            ..Default::default()
+        });
+        let disabled = Some(ControlPermissions {
+            permissions: 0b01 << shift,
+            ..Default::default()
+        });
+
+        assert!(Connection::permission(
+            keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
+            &enabled
+        ));
+        assert!(!Connection::permission(
+            keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
+            &disabled
+        ));
+    }
+
+    #[test]
+    fn software_install_capability_requires_remote_policy_permission_and_service() {
+        assert!(software_install_capability(true, true, true, true));
+        assert!(!software_install_capability(false, true, true, true));
+        assert!(!software_install_capability(true, false, true, true));
+        assert!(!software_install_capability(true, true, false, true));
+        assert!(!software_install_capability(true, true, true, false));
     }
 
     fn assert_scopes(

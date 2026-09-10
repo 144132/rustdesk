@@ -874,6 +874,10 @@ impl InvokeUiSession for FlutterHandler {
         for ref f in pi.features.iter() {
             features.insert("privacy_mode", f.privacy_mode);
         }
+        features.insert(
+            "software_install",
+            crate::client::software_install_feature_supported(pi.features.as_ref()),
+        );
         // compatible with 1.1.9
         if get_version_number(&pi.version) < get_version_number("1.2.0") {
             features.insert("privacy_mode", false);
@@ -1160,6 +1164,23 @@ impl InvokeUiSession for FlutterHandler {
                 log::warn!("Unhandled terminal response type");
             }
         }
+    }
+
+    fn handle_software_install_status(&self, status: SoftwareInstallStatus) {
+        let stage = crate::client::software_install_stage_name(status.stage);
+        self.push_event_(
+            "software_install_status",
+            &[
+                ("request_id", json!(status.request_id)),
+                ("stage", json!(stage)),
+                ("message", json!(status.message)),
+                ("exit_code", json!(status.exit_code)),
+                ("needs_reboot", json!(status.needs_reboot)),
+                ("progress_percent", json!(status.progress_percent)),
+            ],
+            &[],
+            &[],
+        );
     }
 }
 
