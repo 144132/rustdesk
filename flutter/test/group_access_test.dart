@@ -34,7 +34,7 @@ void main() {
       });
     });
 
-    test('admin user requests omit accessible but keep status and pagination', () {
+    test('admin user requests all users without access or status filters', () {
       final request = buildGroupApiRequest(
         resource: GroupApiResource.users,
         isAdmin: true,
@@ -46,7 +46,6 @@ void main() {
       expect(request.queryParameters, {
         'current': '2',
         'pageSize': '100',
-        'status': '1',
       });
     });
 
@@ -85,7 +84,6 @@ void main() {
       expect(adminRequest.queryParameters, {
         'current': '4',
         'pageSize': '100',
-        'status': '1',
       });
       expect(ordinaryRequest.queryParameters, {
         'current': '4',
@@ -93,6 +91,47 @@ void main() {
         'accessible': '',
         'status': '1',
       });
+    });
+
+    test('preserves API server base path for admin and ordinary endpoints', () {
+      final baseUri = Uri.parse('https://host/proxy');
+      final adminDeviceUri = buildGroupApiUri(
+        baseUri,
+        buildGroupApiRequest(
+          resource: GroupApiResource.deviceList,
+          isAdmin: true,
+          current: 1,
+          pageSize: 100,
+        ),
+      );
+      final adminGroupUri = buildGroupApiUri(
+        baseUri,
+        buildGroupApiRequest(
+          resource: GroupApiResource.deviceGroups,
+          isAdmin: true,
+          current: 2,
+          pageSize: 100,
+        ),
+      );
+      final ordinaryUserUri = buildGroupApiUri(
+        baseUri,
+        buildGroupApiRequest(
+          resource: GroupApiResource.users,
+          isAdmin: false,
+          current: 3,
+          pageSize: 25,
+        ),
+      );
+
+      expect(adminDeviceUri.path, '/proxy/api/devices');
+      expect(adminDeviceUri.queryParameters, {
+        'current': '1',
+        'pageSize': '100',
+      });
+      expect(adminGroupUri.path, '/proxy/api/device-groups');
+      expect(ordinaryUserUri.path, '/proxy/api/users');
+      expect(ordinaryUserUri.queryParameters['accessible'], '');
+      expect(ordinaryUserUri.queryParameters['status'], '1');
     });
   });
 

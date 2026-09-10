@@ -25,15 +25,31 @@ GroupApiRequest buildGroupApiRequest({
         queryParameters,
       );
     case GroupApiResource.users:
-      queryParameters['status'] = '1';
-      if (!isAdmin) queryParameters['accessible'] = '';
+      if (!isAdmin) {
+        queryParameters['accessible'] = '';
+        queryParameters['status'] = '1';
+      }
       return GroupApiRequest('/api/users', queryParameters);
     case GroupApiResource.deviceList:
+      if (isAdmin) {
+        return GroupApiRequest('/api/devices', queryParameters);
+      }
+      queryParameters['accessible'] = '';
       queryParameters['status'] = '1';
-      if (!isAdmin) queryParameters['accessible'] = '';
-      return GroupApiRequest(isAdmin ? '/api/devices' : '/api/peers',
-          queryParameters);
+      return GroupApiRequest('/api/peers', queryParameters);
   }
+}
+
+Uri buildGroupApiUri(Uri baseUri, GroupApiRequest request) {
+  var basePath = baseUri.path;
+  if (basePath == '/') basePath = '';
+  if (basePath.endsWith('/')) {
+    basePath = basePath.substring(0, basePath.length - 1);
+  }
+  return baseUri.replace(
+    path: '$basePath${request.path}',
+    queryParameters: request.queryParameters,
+  );
 }
 
 bool isAdminFromUserInfo(Map<String, dynamic>? userInfo) {

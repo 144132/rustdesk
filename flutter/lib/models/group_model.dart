@@ -116,8 +116,7 @@ class GroupModel {
           current: current,
           pageSize: pageSize,
         );
-        var uri = uri0.replace(
-            path: request.path, queryParameters: request.queryParameters);
+        var uri = buildGroupApiUri(uri0, request);
         final resp = await http.get(uri, headers: getHttpHeaders());
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
@@ -170,8 +169,7 @@ class GroupModel {
           current: current,
           pageSize: pageSize,
         );
-        var uri = uri0.replace(
-            path: request.path, queryParameters: request.queryParameters);
+        var uri = buildGroupApiUri(uri0, request);
         final resp = await http.get(uri, headers: getHttpHeaders());
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
@@ -230,8 +228,7 @@ class GroupModel {
           current: current,
           pageSize: pageSize,
         );
-        var uri = uri0.replace(
-            path: request.path, queryParameters: request.queryParameters);
+        var uri = buildGroupApiUri(uri0, request);
         final resp = await http.get(uri, headers: getHttpHeaders());
         _statusCode = resp.statusCode;
 
