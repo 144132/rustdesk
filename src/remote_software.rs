@@ -176,7 +176,7 @@ pub fn validate_manifest(manifest: &RemoteSoftwareManifest) -> Result<(), Remote
         }
         DetectionRule::ExePath(value) => {
             validate_non_empty_field(value, "exe path")?;
-            if !Path::new(value).is_absolute() {
+            if !is_local_windows_absolute_path(value) {
                 return Err(RemoteSoftwareError::InvalidManifest(
                     "exe path must be absolute".into(),
                 ));
@@ -233,6 +233,14 @@ impl RemoteSoftwareStatus {
 
 fn has_control_characters(value: &str) -> bool {
     value.chars().any(char::is_control)
+}
+
+fn is_local_windows_absolute_path(value: &str) -> bool {
+    let bytes = value.as_bytes();
+    bytes.len() >= 3
+        && bytes[0].is_ascii_alphabetic()
+        && bytes[1] == b':'
+        && matches!(bytes[2], b'\\' | b'/')
 }
 
 fn validate_non_empty_field(value: &str, field: &str) -> Result<(), RemoteSoftwareError> {
@@ -331,6 +339,34 @@ mod tests {
         assert!(validate_manifest(&manifest).is_err());
         manifest.detection_rule = DetectionRule::MsiProductCode("".into());
         assert!(validate_manifest(&manifest).is_err());
+    }
+
+    #[test]
+    fn exe_detection_accepts_only_local_drive_rooted_windows_paths() {
+        let accepted = RemoteSoftwareManifest {
+            package_url: "https://update.szxinyu.com/app.exe".into(),
+            installer_type: InstallerType::Exe,
+            detection_rule: DetectionRule::ExePath(
+                r"C:\Program Files\App\App.exe".into(),
+            ),
+            ..test_manifest("https://update.szxinyu.com/app.msi")
+        };
+        assert!(validate_manifest(&accepted).is_ok());
+
+        for path in [
+            r"\\server\share\App.exe",
+            r"C:Program Files\App\App.exe",
+            r"Program Files\App\App.exe",
+            "/tmp/App.exe",
+        ] {
+            let manifest = RemoteSoftwareManifest {
+                package_url: "https://update.szxinyu.com/app.exe".into(),
+                installer_type: InstallerType::Exe,
+                detection_rule: DetectionRule::ExePath(path.into()),
+                ..test_manifest("https://update.szxinyu.com/app.msi")
+            };
+            assert!(validate_manifest(&manifest).is_err(), "{path}");
+        }
     }
 
     #[test]
