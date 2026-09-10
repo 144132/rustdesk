@@ -84,6 +84,11 @@ pub enum InstallOutcome {
 }
 
 pub fn validate_package_url(value: &str) -> Result<Url, RemoteSoftwareError> {
+    if has_control_characters(value) {
+        return Err(RemoteSoftwareError::InvalidPackageUrl(
+            "URL must not contain control characters".into(),
+        ));
+    }
     let url = Url::parse(value)
         .map_err(|error| RemoteSoftwareError::InvalidPackageUrl(error.to_string()))?;
     let host = match url.host() {
@@ -302,6 +307,17 @@ mod tests {
             "https://update.szxinyu.com/app.msi/extra",
         ] {
             assert!(validate_package_url(url).is_err(), "{url}");
+        }
+    }
+
+    #[test]
+    fn package_url_rejects_raw_control_characters() {
+        for url in [
+            "https://update.szxinyu.com/app\r.exe",
+            "https://update.szxinyu.com/app\n.exe",
+            "https://update.szxinyu.com/app\t.exe",
+        ] {
+            assert!(validate_package_url(url).is_err(), "{url:?}");
         }
     }
 
