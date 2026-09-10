@@ -2805,6 +2805,7 @@ impl Connection {
             Some(software_install_action::Union::Cancel(cancel)) => {
                 self.handle_software_install_cancel(cancel.request_id);
             }
+            Some(_) => {}
             None => {}
         }
     }
