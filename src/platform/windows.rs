@@ -750,7 +750,9 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
         // The new state
         current_state: ServiceState::Running,
         // Accept stop events when running
-        controls_accepted: ServiceControlAccept::STOP,
+        controls_accepted: ServiceControlAccept::STOP
+            | ServiceControlAccept::PRESHUTDOWN
+            | ServiceControlAccept::SHUTDOWN,
         // Used to report an error when starting or stopping only, otherwise must be zero
         exit_code: ServiceExitCode::Win32(0),
         // Only used for pending states, otherwise must be zero
