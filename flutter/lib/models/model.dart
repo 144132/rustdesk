@@ -200,6 +200,7 @@ class SoftwareInstallStatus {
   }
 
   bool get isTerminal => const {
+        SoftwareInstallStage.downloaded,
         SoftwareInstallStage.alreadyInstalled,
         SoftwareInstallStage.success,
         SoftwareInstallStage.needsReboot,
@@ -231,6 +232,7 @@ class FfiModel with ChangeNotifier {
   bool _showMyCursor = false;
   String? _softwareInstallRequestId;
   SoftwareInstallStatus? _softwareInstallStatus;
+  final _ignoredSoftwareInstallRequestIds = <String>{};
   WeakReference<FFI> parent;
   late final SessionID sessionId;
 
@@ -269,6 +271,7 @@ class FfiModel with ChangeNotifier {
 
   void beginSoftwareInstall(String requestId) {
     if (requestId.trim().isEmpty) return;
+    _ignoredSoftwareInstallRequestIds.remove(requestId);
     _softwareInstallRequestId = requestId;
     _softwareInstallStatus = null;
     notifyListeners();
@@ -286,14 +289,24 @@ class FfiModel with ChangeNotifier {
     });
   }
 
+  void clearSoftwareInstallUiState({String? requestId}) {
+    if (requestId != null && _softwareInstallRequestId != requestId) return;
+    final clearedRequestId = requestId ?? _softwareInstallRequestId;
+    if (clearedRequestId != null) {
+      _ignoredSoftwareInstallRequestIds.add(clearedRequestId);
+    }
+    _softwareInstallRequestId = null;
+    _softwareInstallStatus = null;
+    notifyListeners();
+  }
+
   void handleSoftwareInstallStatus(Map<String, dynamic> event) {
     final status = SoftwareInstallStatus.fromEvent(event);
     if (status == null) return;
-    if (_softwareInstallRequestId != null &&
-        _softwareInstallRequestId != status.requestId) {
+    if (_ignoredSoftwareInstallRequestIds.contains(status.requestId)) return;
+    if (_softwareInstallRequestId != status.requestId) {
       return;
     }
-    _softwareInstallRequestId = status.requestId;
     _softwareInstallStatus = status;
     notifyListeners();
   }
@@ -395,6 +408,9 @@ class FfiModel with ChangeNotifier {
     _secure = null;
     _direct = null;
     _inputBlocked = false;
+    if (_softwareInstallRequestId != null) {
+      _ignoredSoftwareInstallRequestIds.add(_softwareInstallRequestId!);
+    }
     _softwareInstallRequestId = null;
     _softwareInstallStatus = null;
     _timer?.cancel();

@@ -1028,8 +1028,7 @@ class _SoftwareInstallMenu extends StatelessWidget {
         _correctedRemoteSoftwareManifest(submittedForm!, requestId));
     ffi.ffiModel.beginSoftwareInstall(requestId);
     try {
-      final dynamic bridge = bind;
-      await bridge.sessionSoftwareInstall(
+      await bind.sessionSoftwareInstall(
           sessionId: ffi.sessionId, manifestJson: manifestJson);
     } catch (error) {
       ffi.ffiModel.markSoftwareInstallFailure(requestId, '发送失败：$error');
@@ -1126,12 +1125,12 @@ class _SoftwareInstallStatusDialog extends StatelessWidget {
     final requestId = ffi.ffiModel.softwareInstallRequestId;
     if (requestId != null && ffi.ffiModel.softwareInstallBusy) {
       try {
-        final dynamic bridge = bind;
-        await bridge.sessionSoftwareInstallCancel(
+        await bind.sessionSoftwareInstallCancel(
             sessionId: ffi.sessionId, requestId: requestId);
       } catch (error) {
         debugPrint('Failed to cancel remote software install: $error');
       }
+      ffi.ffiModel.clearSoftwareInstallUiState(requestId: requestId);
     }
     if (context.mounted) Navigator.of(context).pop();
   }
