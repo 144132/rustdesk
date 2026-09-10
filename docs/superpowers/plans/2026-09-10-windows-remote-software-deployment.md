@@ -21,7 +21,7 @@
 - 目标端缓存和清单位于 `%ProgramData%\\新育智慧校园\\remote-software`，使用 `.part` 和原子改名避免半成品。
 - 自愈只恢复已登记软件的缺失状态，不自动卸载软件，不在第一版实现批量编排或版本升级。
 - 每个任务使用 `request_id` 幂等，同一目标同时只运行一个软件安装任务。
-- 每个行为先写失败测试并实际运行确认失败，再写最小实现；完成前必须运行完整可用的验证命令。
+- 每个行为先写失败测试并在可用环境中实际运行确认失败，再写最小实现；完成前必须在可用环境运行完整验证命令。本机缺少工具链时记录限制，并由 Task 6 的 GitHub Actions 在最终验收前补跑，不得把未运行报告为通过。
 
 ## 文件与职责地图
 
@@ -89,7 +89,7 @@ fn retry_delay_uses_bounded_backoff() {
 
 Run: `cargo test --lib remote_software::tests --features flutter`
 
-Expected: FAIL because the manifest types and validators do not exist yet. If the command cannot run on the development machine, run the same command in the GitHub Actions Rust environment before proceeding.
+Expected: FAIL because the manifest types and validators do not exist yet. If the command cannot run on the development machine, record the unavailable toolchain and defer the same command to Task 6's GitHub Actions verification before final completion.
 
 - [ ] **Step 3: Implement the minimal pure policy module**
 
@@ -103,7 +103,7 @@ Run: `cargo test --lib remote_software::tests --features flutter`
 
 Run: `cargo test --lib config::tests::test_remote_configuration_modification_default_is_enabled --features flutter`
 
-Expected: both commands exit 0 with no failed tests.
+Expected: when a local Rust toolchain is available, both commands exit 0 with no failed tests. If it is unavailable, record both commands as not run and require their successful execution in Task 6's GitHub Actions verification before final completion.
 
 - [ ] **Step 5: Commit the focused unit**
 
