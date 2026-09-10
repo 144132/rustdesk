@@ -160,7 +160,7 @@ jobs:
       with:
         toolchain: stable
         targets: ${{ matrix.job.target }}
-        components: ''
+        components: rustfmt
 
     - name: Show version information (Rust, cargo, GCC)
       shell: bash
@@ -173,6 +173,17 @@ jobs:
         rustc -V
 
     - uses: Swatinem/rust-cache@e18b497796c12c097a38f9edb9d0641fb99eee32 # v2
+
+    - name: Check Rust formatting
+      shell: bash
+      run: cargo fmt --all -- --check
+
+    - name: Run remote software policy and protocol tests
+      uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
+      with:
+        use-cross: ${{ matrix.job.use-cross }}
+        command: test
+        args: --locked --target=${{ matrix.job.target }} --lib remote_software --features flutter
 
     - name: Build
       uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
