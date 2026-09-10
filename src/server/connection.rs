@@ -1937,10 +1937,7 @@ impl Connection {
         let software_install = software_install_capability(
             self.is_remote(),
             Config::get_bool_option(keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL),
-            Self::permission(
-                keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
-                &self.control_permissions,
-            ),
+            &self.control_permissions,
             crate::platform::windows::is_self_service_running(),
         );
         #[cfg(not(target_os = "windows"))]
@@ -2525,6 +2522,17 @@ impl Connection {
         control_permissions: &Option<ControlPermissions>,
     ) -> bool {
         use hbb_common::rendezvous_proto::control_permissions::Permission;
+        if enable_prefix_option == keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL {
+            return control_permissions
+                .as_ref()
+                .and_then(|control_permissions| {
+                    crate::get_control_permission(
+                        control_permissions.permissions,
+                        Permission::software_install,
+                    )
+                })
+                == Some(true);
+        }
         if let Some(control_permissions) = control_permissions {
             let permission = match enable_prefix_option {
                 keys::OPTION_ENABLE_KEYBOARD => Some(Permission::keyboard),
@@ -2539,7 +2547,6 @@ impl Connection {
                 keys::OPTION_ENABLE_RECORD_SESSION => Some(Permission::recording),
                 keys::OPTION_ENABLE_BLOCK_INPUT => Some(Permission::block_input),
                 keys::OPTION_ENABLE_PRIVACY_MODE => Some(Permission::privacy_mode),
-                keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL => Some(Permission::software_install),
                 _ => None,
             };
             if let Some(permission) = permission {
@@ -6113,10 +6120,13 @@ impl Connection {
 fn software_install_capability(
     is_remote: bool,
     policy_enabled: bool,
-    permission_enabled: bool,
+    control_permissions: &Option<ControlPermissions>,
     service_running: bool,
 ) -> bool {
-    is_remote && policy_enabled && permission_enabled && service_running
+    is_remote
+        && policy_enabled
+        && Connection::permission(keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL, control_permissions)
+        && service_running
 }
 
 #[cfg(feature = "flutter")]
@@ -7273,39 +7283,68 @@ mod test {
     }
 
     #[test]
-    fn software_install_uses_an_independent_control_permission() {
+    fn software_install_permission_requires_explicit_control_permission() {
         use hbb_common::{
             protobuf::Enum,
             rendezvous_proto::control_permissions::Permission,
         };
 
         let shift = Permission::software_install.value() * 2;
-        let enabled = Some(ControlPermissions {
-            permissions: 0b10 << shift,
-            ..Default::default()
-        });
-        let disabled = Some(ControlPermissions {
-            permissions: 0b01 << shift,
-            ..Default::default()
-        });
+        let cases = [
+            (None, false),
+            (
+                Some(ControlPermissions::new()),
+                false,
+            ),
+            (
+                Some(ControlPermissions {
+                    permissions: 0b11 << shift,
+                    ..Default::default()
+                }),
+                false,
+            ),
+            (
+                Some(ControlPermissions {
+                    permissions: 0b01 << shift,
+                    ..Default::default()
+                }),
+                false,
+            ),
+            (
+                Some(ControlPermissions {
+                    permissions: 0b10 << shift,
+                    ..Default::default()
+                }),
+                true,
+            ),
+        ];
 
-        assert!(Connection::permission(
-            keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
-            &enabled
-        ));
-        assert!(!Connection::permission(
-            keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
-            &disabled
-        ));
+        for (control_permissions, expected) in cases {
+            assert_eq!(
+                Connection::permission(
+                    keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
+                    &control_permissions
+                ),
+                expected
+            );
+            assert_eq!(
+                software_install_capability(true, true, &control_permissions, true),
+                expected
+            );
+        }
     }
 
     #[test]
     fn software_install_capability_requires_remote_policy_permission_and_service() {
-        assert!(software_install_capability(true, true, true, true));
-        assert!(!software_install_capability(false, true, true, true));
-        assert!(!software_install_capability(true, false, true, true));
-        assert!(!software_install_capability(true, true, false, true));
-        assert!(!software_install_capability(true, true, true, false));
+        let enabled = Some(ControlPermissions {
+            permissions: 0b10 << 26,
+            ..Default::default()
+        });
+        assert!(software_install_capability(true, true, &enabled, true));
+        assert!(!software_install_capability(false, true, &enabled, true));
+        assert!(!software_install_capability(true, false, &enabled, true));
+        assert!(!software_install_capability(true, true, &None, true));
+        assert!(!software_install_capability(true, true, &enabled, false));
     }
 
     fn assert_scopes(

@@ -269,7 +269,7 @@ mod tests {
             SoftwareDetectionType, SoftwareInstallAction, SoftwareInstallMode,
             SoftwareInstallRequest, SoftwareInstallStage, SoftwareInstallerType,
         },
-        protobuf::Message as _,
+        protobuf::{Message as _, MessageFull},
     };
     use std::time::Duration;
 
@@ -352,6 +352,17 @@ mod tests {
             ),
             "unknown"
         );
+    }
+
+    #[test]
+    fn software_install_request_schema_has_no_arbitrary_command_field() {
+        let fields = SoftwareInstallRequest::descriptor().fields();
+        for forbidden_name in ["command", "shell", "script"] {
+            assert!(
+                fields.iter().all(|field| field.name() != forbidden_name),
+                "forbidden software install request field: {forbidden_name}"
+            );
+        }
     }
 
     #[test]
