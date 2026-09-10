@@ -1566,7 +1566,8 @@ fn shortcut_names_for(internal: &str, display: &str) -> ResultType<ShortcutNames
     Ok(ShortcutNames {
         internal: internal.to_owned(),
         display: display.to_owned(),
-        legacy: (display != LEGACY_SHORTCUT_DISPLAY_NAME)
+        legacy: (internal == LEGACY_SHORTCUT_DISPLAY_NAME
+            && display != LEGACY_SHORTCUT_DISPLAY_NAME)
             .then(|| LEGACY_SHORTCUT_DISPLAY_NAME.to_owned()),
     })
 }
@@ -4955,6 +4956,13 @@ mod tests {
         assert_eq!(names.internal, "RustDesk");
         assert_eq!(names.display, "新育智慧校园远程协助");
         assert_eq!(names.legacy, Some("RustDesk".to_owned()));
+    }
+
+    #[test]
+    fn shortcut_names_do_not_cleanup_rustdesk_for_custom_internal_name() {
+        let names = shortcut_names_for("RustDesk-Admin", "新育智慧校园远程协助").unwrap();
+
+        assert_eq!(names.legacy, None);
     }
 
     #[test]
