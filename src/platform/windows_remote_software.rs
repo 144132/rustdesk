@@ -46,6 +46,12 @@ pub struct RecoveryState {
     pub entries: Vec<RecoveryEntry>,
 }
 
+#[derive(Deserialize)]
+struct RawRecoveryState {
+    #[serde(default)]
+    entries: Vec<serde_json::Value>,
+}
+
 #[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
 pub struct RecoveryEntry {
     pub manifest: RemoteSoftwareManifest,
@@ -56,9 +62,12 @@ pub struct RecoveryEntry {
     pub paused: bool,
 }
 
-#[derive(Clone, Debug)]
 pub struct StateStore {
     root: PathBuf,
+    #[cfg(windows)]
+    // Pins ProgramData and every feature ancestor without delete sharing, so later
+    // path-based IO cannot be redirected through an ancestor junction swap.
+    _cache_guard: Option<native::CacheDirectory>,
 }
 
 struct TemporaryStateFile {
@@ -74,13 +83,29 @@ impl Drop for TemporaryStateFile {
 }
 
 impl StateStore {
-    pub fn with_root(root: PathBuf) -> Self {
-        Self { root }
+    #[cfg(test)]
+    fn with_root(root: PathBuf) -> Self {
+        Self {
+            root,
+            #[cfg(windows)]
+            _cache_guard: None,
+        }
     }
 
     #[cfg(windows)]
     pub fn production() -> Result<Self, RemoteSoftwareError> {
-        Ok(Self::with_root(native::prepare_state_root()?))
+        Self::from_prepared_cache(native::prepare_cache()?)
+    }
+
+    #[cfg(windows)]
+    fn from_prepared_cache(
+        cache_guard: native::CacheDirectory,
+    ) -> Result<Self, RemoteSoftwareError> {
+        let root = cache_guard.state_root()?;
+        Ok(Self {
+            root,
+            _cache_guard: Some(cache_guard),
+        })
     }
 
     pub fn state_path(&self) -> PathBuf {
@@ -99,12 +124,17 @@ impl StateStore {
             }
             Err(_) => return Err(RemoteSoftwareError::State),
         };
-        let mut state: RecoveryState = match serde_json::from_slice(&bytes) {
+        let raw: RawRecoveryState = match serde_json::from_slice(&bytes) {
             Ok(state) => state,
             Err(_) => return Ok(RecoveryState::default()),
         };
-        state.entries.retain(|entry| self.validate_entry(entry).is_ok());
-        Ok(state)
+        let entries = raw
+            .entries
+            .into_iter()
+            .filter_map(|value| serde_json::from_value::<RecoveryEntry>(value).ok())
+            .filter(|entry| self.validate_entry(entry).is_ok())
+            .collect();
+        Ok(RecoveryState { entries })
     }
 
     pub fn save(&self, state: &RecoveryState) -> Result<(), RemoteSoftwareError> {
@@ -134,6 +164,13 @@ impl StateStore {
     }
 
     pub fn remove_stale_part_files(&self) -> Result<(), RemoteSoftwareError> {
+        self.remove_stale_part_files_with(|_, metadata| reject_reparse(metadata))
+    }
+
+    fn remove_stale_part_files_with(
+        &self,
+        mut inspect: impl FnMut(&Path, &fs::Metadata) -> Result<(), RemoteSoftwareError>,
+    ) -> Result<(), RemoteSoftwareError> {
         let package_root = self.package_root();
         let metadata = match fs::symlink_metadata(&package_root) {
             Ok(metadata) => metadata,
@@ -150,6 +187,10 @@ impl StateStore {
         };
         for entry in entries {
             let entry = entry.map_err(|_| RemoteSoftwareError::State)?;
+            let path = entry.path();
+            let metadata = fs::symlink_metadata(&path).map_err(|_| RemoteSoftwareError::State)?;
+            // Inspect every direct child before considering its name or deleting it.
+            inspect(&path, &metadata)?;
             if !entry
                 .file_name()
                 .to_str()
@@ -157,9 +198,8 @@ impl StateStore {
             {
                 continue;
             }
-            let metadata = fs::symlink_metadata(entry.path()).map_err(|_| RemoteSoftwareError::State)?;
-            if metadata.is_file() && !metadata.file_type().is_symlink() {
-                fs::remove_file(entry.path()).map_err(|_| RemoteSoftwareError::State)?;
+            if metadata.is_file() {
+                fs::remove_file(path).map_err(|_| RemoteSoftwareError::State)?;
             }
         }
         Ok(())
@@ -662,10 +702,19 @@ mod native {
         }
     }
 
-    struct CacheDirectory {
+    pub(super) struct CacheDirectory {
         path: PathBuf,
         // Deny directory rename/deletion for the entire operation, including installation.
         _handles: Vec<File>,
+    }
+
+    impl CacheDirectory {
+        pub(super) fn state_root(&self) -> Result<PathBuf, RemoteSoftwareError> {
+            self.path
+                .parent()
+                .map(Path::to_path_buf)
+                .ok_or(RemoteSoftwareError::State)
+        }
     }
 
     fn directory_handle(path: &Path, writable_acl: bool) -> Result<File, RemoteSoftwareError> {
@@ -705,7 +754,7 @@ mod native {
         Ok(LocalDescriptor(descriptor))
     }
 
-    fn prepare_cache() -> Result<CacheDirectory, RemoteSoftwareError> {
+    pub(super) fn prepare_cache() -> Result<CacheDirectory, RemoteSoftwareError> {
         let value = unsafe { SHGetKnownFolderPath(&FOLDERID_ProgramData, KF_FLAG_DEFAULT, None) }
             .map_err(|_| RemoteSoftwareError::Cache)?;
         let path = unsafe { value.to_string() };
@@ -750,15 +799,6 @@ mod native {
             handles.push(file);
         }
         Ok(CacheDirectory { path, _handles: handles })
-    }
-
-    pub(super) fn prepare_state_root() -> Result<PathBuf, RemoteSoftwareError> {
-        let directory = prepare_cache()?;
-        directory
-            .path
-            .parent()
-            .map(Path::to_path_buf)
-            .ok_or(RemoteSoftwareError::State)
     }
 
     fn download(
@@ -877,6 +917,36 @@ mod native {
             fs::write(&path, b"not a directory").unwrap();
             assert!(directory_handle(&path, false).is_err());
             fs::remove_file(&path).unwrap();
+        }
+
+        #[test]
+        fn production_store_pins_intermediate_ancestor_against_junction_swap() {
+            let base = std::env::temp_dir().join(format!(
+                "remote-software-state-root-{}",
+                uuid::Uuid::new_v4()
+            ));
+            let program_data = base.join("ProgramData");
+            let brand = program_data.join("新育智慧校园");
+            let feature = brand.join("remote-software");
+            let packages = feature.join("packages");
+            fs::create_dir_all(&packages).unwrap();
+            let handles = [&program_data, &brand, &feature, &packages]
+                .into_iter()
+                .map(|path| directory_handle(path, false).unwrap())
+                .collect();
+            let store = StateStore::from_prepared_cache(CacheDirectory {
+                path: packages,
+                _handles: handles,
+            })
+            .unwrap();
+            let moved = base.join("brand-moved");
+            assert!(
+                fs::rename(&brand, &moved).is_err(),
+                "an intermediate ancestor must not be replaceable by a junction"
+            );
+            drop(store);
+            fs::rename(&brand, &moved).unwrap();
+            fs::remove_dir_all(base).unwrap();
         }
     }
 
@@ -1380,6 +1450,21 @@ mod tests {
     }
 
     #[test]
+    fn recovery_state_load_keeps_valid_sibling_of_structurally_invalid_entry() {
+        let (root, store) = test_state_store("state-structural-validation");
+        let valid = test_state_entry(&root);
+        let persisted = serde_json::json!({
+            "entries": [
+                { "manifest": 42, "failure_count": "not-a-number" },
+                serde_json::to_value(&valid).unwrap()
+            ]
+        });
+        fs::write(store.state_path(), serde_json::to_vec(&persisted).unwrap()).unwrap();
+        assert_eq!(store.load().unwrap().entries, vec![valid]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn state_save_atomically_replaces_old_file_without_temporary_residue() {
         let (root, store) = test_state_store("state-atomic-replace");
         let first = RecoveryState {
@@ -1424,6 +1509,23 @@ mod tests {
         for path in [&verified, &unrelated, &nested_part, &outside_part] {
             assert!(path.exists(), "cleanup escaped its direct .part scope: {path:?}");
         }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_partial_cleanup_rejects_direct_reparse_before_deletion() {
+        let (root, store) = test_state_store("state-reparse-part");
+        let tagged = root.join("packages").join("tagged.part");
+        fs::write(&tagged, b"must-remain").unwrap();
+        let result = store.remove_stale_part_files_with(|path, _| {
+            if path == tagged {
+                reject_reparse_attributes(0x400)
+            } else {
+                Ok(())
+            }
+        });
+        assert!(result.is_err());
+        assert_eq!(fs::read(&tagged).unwrap(), b"must-remain");
         fs::remove_dir_all(root).unwrap();
     }
 
