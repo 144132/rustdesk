@@ -1,17 +1,23 @@
-//! One operation only. Authorization, persistence and recovery scheduling belong to callers.
+//! Windows remote-software operation, durable state, and service-only recovery worker.
 use crate::remote_software::{
-    installer_outcome, validate_manifest, validate_package_url, validate_sha256, InstallOutcome,
-    DetectionRule, InstallMode, InstallerType, RemoteSoftwareManifest, RemoteSoftwareStage,
-    RemoteSoftwareStatus,
+    installer_outcome, retry_delay, validate_manifest, validate_package_url, validate_sha256,
+    InstallOutcome, DetectionRule, InstallMode, InstallerType, RemoteSoftwareManifest,
+    RemoteSoftwareStage, RemoteSoftwareStatus,
 };
 use hbb_common::thiserror;
 use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
+    ffi::{OsStr, OsString},
     fs::{self, File, OpenOptions},
     io::{self, Read, Write},
     path::{Path, PathBuf},
+    sync::{Condvar, Mutex},
+    time::Duration,
 };
+
+#[cfg(windows)]
+use std::sync::Arc;
 
 #[cfg(windows)]
 pub use native::{build_process_command, detect_installed, execute, service_is_available};
@@ -40,6 +46,8 @@ pub enum RemoteSoftwareError {
 }
 
 const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+const SELF_HEAL_INTERVAL: Duration = Duration::from_secs(5 * 60);
+const ATTEMPT_WINDOW_SECONDS: u64 = 60 * 60;
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct RecoveryState {
@@ -206,13 +214,458 @@ impl StateStore {
     }
 
     fn validate_entry(&self, entry: &RecoveryEntry) -> Result<(), RemoteSoftwareError> {
-        validate_manifest(&entry.manifest)?;
-        let (_, expected) = cache_paths(&self.package_root(), &entry.manifest)?;
-        if entry.verified_package_path != expected {
+        validate_recovery_entry(&self.package_root(), entry)
+    }
+}
+
+trait WorkerStateStore {
+    fn remove_stale_part_files(&mut self) -> Result<(), RemoteSoftwareError>;
+    fn load(&mut self) -> Result<RecoveryState, RemoteSoftwareError>;
+    fn save(&mut self, state: &RecoveryState) -> Result<(), RemoteSoftwareError>;
+    fn package_root(&self) -> PathBuf;
+}
+
+impl WorkerStateStore for StateStore {
+    fn remove_stale_part_files(&mut self) -> Result<(), RemoteSoftwareError> {
+        StateStore::remove_stale_part_files(self)
+    }
+
+    fn load(&mut self) -> Result<RecoveryState, RemoteSoftwareError> {
+        StateStore::load(self)
+    }
+
+    fn save(&mut self, state: &RecoveryState) -> Result<(), RemoteSoftwareError> {
+        StateStore::save(self, state)
+    }
+
+    fn package_root(&self) -> PathBuf {
+        StateStore::package_root(self)
+    }
+}
+
+fn validate_recovery_entry(
+    package_root: &Path,
+    entry: &RecoveryEntry,
+) -> Result<(), RemoteSoftwareError> {
+    validate_manifest(&entry.manifest)?;
+    let (_, expected) = cache_paths(package_root, &entry.manifest)?;
+    if entry.verified_package_path != expected {
+        return Err(RemoteSoftwareError::State);
+    }
+    Ok(())
+}
+
+#[derive(Default)]
+struct WorkerStop {
+    stopped: Mutex<bool>,
+    wake: Condvar,
+}
+
+impl WorkerStop {
+    fn stop(&self) {
+        if let Ok(mut stopped) = self.stopped.lock() {
+            *stopped = true;
+            self.wake.notify_all();
+        }
+    }
+
+    fn is_stopped(&self) -> bool {
+        self.stopped.lock().map(|stopped| *stopped).unwrap_or(true)
+    }
+
+    fn wait(&self, duration: Duration) -> bool {
+        let stopped = match self.stopped.lock() {
+            Ok(stopped) => stopped,
+            Err(_) => return false,
+        };
+        if *stopped {
+            return false;
+        }
+        self.wake
+            .wait_timeout_while(stopped, duration, |stopped| !*stopped)
+            .map(|(stopped, _)| !*stopped)
+            .unwrap_or(false)
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum AttemptDecision {
+    Ready,
+    WaitUntil(u64),
+    Paused,
+}
+
+fn recent_attempts(entry: &RecoveryEntry, now: u64) -> impl Iterator<Item = u64> + '_ {
+    entry
+        .attempt_timestamps
+        .iter()
+        .copied()
+        .filter(move |timestamp| *timestamp > now || now - *timestamp < ATTEMPT_WINDOW_SECONDS)
+}
+
+fn attempt_decision(entry: &RecoveryEntry, now: u64) -> AttemptDecision {
+    if entry.paused {
+        return AttemptDecision::Paused;
+    }
+    if recent_attempts(entry, now).count() >= 3 {
+        return AttemptDecision::Paused;
+    }
+    let retry_due = if entry.failure_count == 0 {
+        None
+    } else {
+        let delay = match retry_delay(entry.failure_count - 1) {
+            Some(delay) => delay.as_secs(),
+            None => return AttemptDecision::Paused,
+        };
+        recent_attempts(entry, now)
+            .max()
+            .map(|last| last.saturating_add(delay))
+    };
+    if let Some(due) = retry_due {
+        if now < due {
+            return AttemptDecision::WaitUntil(due);
+        }
+    }
+    AttemptDecision::Ready
+}
+
+fn record_attempt_started(entry: &mut RecoveryEntry, now: u64) {
+    entry.attempt_timestamps.push(now);
+    entry.failure_count = entry.failure_count.saturating_add(1);
+    entry.paused = false;
+    entry.last_result = Some(RemoteSoftwareStatus {
+        request_id: entry.manifest.request_id.clone(),
+        stage: RemoteSoftwareStage::Queued,
+        message: "self_heal_attempt".into(),
+        exit_code: None,
+        needs_reboot: false,
+        progress_percent: None,
+    });
+}
+
+fn result_succeeded(stage: &RemoteSoftwareStage) -> bool {
+    matches!(
+        stage,
+        RemoteSoftwareStage::AlreadyInstalled
+            | RemoteSoftwareStage::Success
+            | RemoteSoftwareStage::NeedsReboot
+    )
+}
+
+fn apply_execution_result(entry: &mut RecoveryEntry, status: RemoteSoftwareStatus, now: u64) {
+    if result_succeeded(&status.stage) {
+        entry.failure_count = 0;
+        entry.attempt_timestamps.clear();
+        entry.paused = false;
+    } else if recent_attempts(entry, now).count() >= 3
+        || retry_delay(entry.failure_count.saturating_sub(1)).is_none()
+    {
+        entry.paused = true;
+    }
+    entry.last_result = Some(status);
+}
+
+fn reset_paused_for_restart(entry: &mut RecoveryEntry) -> bool {
+    if !entry.paused {
+        return false;
+    }
+    entry.paused = false;
+    entry.failure_count = 0;
+    entry.attempt_timestamps.clear();
+    true
+}
+
+fn installed_status(request_id: &str) -> RemoteSoftwareStatus {
+    RemoteSoftwareStatus {
+        request_id: request_id.into(),
+        stage: RemoteSoftwareStage::AlreadyInstalled,
+        message: "already_installed".into(),
+        exit_code: None,
+        needs_reboot: false,
+        progress_percent: Some(100),
+    }
+}
+
+fn missing_terminal_status(request_id: &str) -> RemoteSoftwareStatus {
+    RemoteSoftwareStatus {
+        request_id: request_id.into(),
+        stage: RemoteSoftwareStage::Failed,
+        message: "installer_failed: missing terminal status".into(),
+        exit_code: None,
+        needs_reboot: false,
+        progress_percent: None,
+    }
+}
+
+fn run_worker_pass<S, D, E>(
+    store: &mut S,
+    state: &mut RecoveryState,
+    stop: &WorkerStop,
+    now: u64,
+    detect: &mut D,
+    execute_entry: &mut E,
+) -> Result<(), RemoteSoftwareError>
+where
+    S: WorkerStateStore,
+    D: FnMut(&DetectionRule) -> Result<bool, RemoteSoftwareError>,
+    E: FnMut(RemoteSoftwareManifest) -> Option<RemoteSoftwareStatus>,
+{
+    if stop.is_stopped() {
+        return Ok(());
+    }
+    let package_root = store.package_root();
+    let count = state.entries.len();
+    state
+        .entries
+        .retain(|entry| validate_recovery_entry(&package_root, entry).is_ok());
+    if state.entries.len() != count {
+        store.save(state)?;
+    }
+    for index in 0..state.entries.len() {
+        if stop.is_stopped() {
+            break;
+        }
+        let before = state.entries[index].attempt_timestamps.len();
+        state.entries[index]
+            .attempt_timestamps
+            .retain(|timestamp| *timestamp > now || now - *timestamp < ATTEMPT_WINDOW_SECONDS);
+        if state.entries[index].attempt_timestamps.len() != before {
+            store.save(state)?;
+        }
+        let detection = detect(&state.entries[index].manifest.detection_rule);
+        match detection {
+            Ok(true) => {
+                let status = installed_status(&state.entries[index].manifest.request_id);
+                apply_execution_result(&mut state.entries[index], status, now);
+                store.save(state)?;
+                continue;
+            }
+            Err(error) => {
+                state.entries[index].last_result = Some(RemoteSoftwareStatus {
+                    request_id: state.entries[index].manifest.request_id.clone(),
+                    stage: RemoteSoftwareStage::Failed,
+                    message: error.to_string(),
+                    exit_code: None,
+                    needs_reboot: false,
+                    progress_percent: None,
+                });
+                store.save(state)?;
+                continue;
+            }
+            Ok(false) => {}
+        }
+        if stop.is_stopped() {
+            break;
+        }
+        match attempt_decision(&state.entries[index], now) {
+            AttemptDecision::WaitUntil(_) => continue,
+            AttemptDecision::Paused => {
+                if !state.entries[index].paused {
+                    state.entries[index].paused = true;
+                    store.save(state)?;
+                }
+                continue;
+            }
+            AttemptDecision::Ready => {}
+        }
+        record_attempt_started(&mut state.entries[index], now);
+        let manifest = state.entries[index].manifest.clone();
+        store.save(state)?;
+        let status = execute_entry(manifest.clone())
+            .filter(|status| result_succeeded(&status.stage) || status.stage == RemoteSoftwareStage::Failed)
+            .unwrap_or_else(|| missing_terminal_status(&manifest.request_id));
+        apply_execution_result(&mut state.entries[index], status, now);
+        store.save(state)?;
+    }
+    Ok(())
+}
+
+fn run_worker_loop<S, C, W, D, E>(
+    store: &mut S,
+    stop: &WorkerStop,
+    mut now: C,
+    mut wait: W,
+    mut detect: D,
+    mut execute_entry: E,
+) -> Result<(), RemoteSoftwareError>
+where
+    S: WorkerStateStore,
+    C: FnMut() -> u64,
+    W: FnMut(Duration, &WorkerStop) -> bool,
+    D: FnMut(&DetectionRule) -> Result<bool, RemoteSoftwareError>,
+    E: FnMut(RemoteSoftwareManifest) -> Option<RemoteSoftwareStatus>,
+{
+    if stop.is_stopped() {
+        return Ok(());
+    }
+    store.remove_stale_part_files()?;
+    let mut state = store.load()?;
+    let mut restarted = false;
+    for entry in &mut state.entries {
+        restarted |= reset_paused_for_restart(entry);
+    }
+    if restarted {
+        store.save(&state)?;
+    }
+    run_worker_pass(
+        store,
+        &mut state,
+        stop,
+        now(),
+        &mut detect,
+        &mut execute_entry,
+    )?;
+    while wait(SELF_HEAL_INTERVAL, stop) {
+        if stop.is_stopped() {
+            break;
+        }
+        run_worker_pass(
+            store,
+            &mut state,
+            stop,
+            now(),
+            &mut detect,
+            &mut execute_entry,
+        )?;
+    }
+    Ok(())
+}
+
+fn worker_entry_allowed(
+    windows: bool,
+    installed: bool,
+    service_available: bool,
+    args: &[OsString],
+) -> bool {
+    windows
+        && installed
+        && service_available
+        && args.len() == 1
+        && args[0] == OsStr::new("--service")
+}
+
+#[cfg(windows)]
+static SELF_HEAL_WORKER_RUNNING: std::sync::atomic::AtomicBool =
+    std::sync::atomic::AtomicBool::new(false);
+
+#[cfg(windows)]
+struct WorkerRunningGuard;
+
+#[cfg(windows)]
+impl Drop for WorkerRunningGuard {
+    fn drop(&mut self) {
+        SELF_HEAL_WORKER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+    }
+}
+
+#[cfg(windows)]
+pub struct SelfHealWorkerHandle {
+    stop: Arc<WorkerStop>,
+    thread: Option<std::thread::JoinHandle<()>>,
+}
+
+#[cfg(windows)]
+impl SelfHealWorkerHandle {
+    pub fn stop(&mut self) {
+        self.stop_inner();
+    }
+
+    fn stop_inner(&mut self) {
+        self.stop.stop();
+        if let Some(thread) = self.thread.take() {
+            let _ = thread.join();
+        }
+    }
+}
+
+#[cfg(windows)]
+impl Drop for SelfHealWorkerHandle {
+    fn drop(&mut self) {
+        self.stop_inner();
+    }
+}
+
+#[cfg(windows)]
+pub fn start_self_heal_worker() -> Result<Option<SelfHealWorkerHandle>, RemoteSoftwareError> {
+    let args = std::env::args_os().skip(1).collect::<Vec<_>>();
+    if !worker_entry_allowed(
+        true,
+        crate::platform::is_installed(),
+        service_is_available(),
+        &args,
+    ) {
+        return Ok(None);
+    }
+    if SELF_HEAL_WORKER_RUNNING
+        .compare_exchange(
+            false,
+            true,
+            std::sync::atomic::Ordering::Acquire,
+            std::sync::atomic::Ordering::Relaxed,
+        )
+        .is_err()
+    {
+        return Ok(None);
+    }
+    let mut store = match StateStore::production() {
+        Ok(store) => store,
+        Err(error) => {
+            SELF_HEAL_WORKER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
+            return Err(error);
+        }
+    };
+    let stop = Arc::new(WorkerStop::default());
+    let worker_stop = stop.clone();
+    let thread = match std::thread::Builder::new()
+        .name("remote-software-self-heal".into())
+        .spawn(move || {
+            let _running = WorkerRunningGuard;
+            let runtime = match hbb_common::tokio::runtime::Builder::new_current_thread()
+                .enable_all()
+                .build()
+            {
+                Ok(runtime) => runtime,
+                Err(_) => {
+                    hbb_common::log::error!("remote software self-heal runtime unavailable");
+                    return;
+                }
+            };
+            let result = run_worker_loop(
+                &mut store,
+                &worker_stop,
+                || {
+                    std::time::SystemTime::now()
+                        .duration_since(std::time::UNIX_EPOCH)
+                        .map(|duration| duration.as_secs())
+                        .unwrap_or(0)
+                },
+                |duration, stop| stop.wait(duration),
+                native::detect_installed,
+                |manifest| {
+                    let last = Mutex::new(None);
+                    runtime.block_on(native::execute(manifest, |status| {
+                        if let Ok(mut last) = last.lock() {
+                            *last = Some(status);
+                        }
+                    }));
+                    last.into_inner().ok().flatten()
+                },
+            );
+            if result.is_err() {
+                hbb_common::log::error!("remote software self-heal worker stopped after state error");
+            }
+        })
+    {
+        Ok(thread) => thread,
+        Err(_) => {
+            SELF_HEAL_WORKER_RUNNING.store(false, std::sync::atomic::Ordering::Release);
             return Err(RemoteSoftwareError::State);
         }
-        Ok(())
-    }
+    };
+    Ok(Some(SelfHealWorkerHandle {
+        stop,
+        thread: Some(thread),
+    }))
 }
 
 #[cfg(not(windows))]
@@ -1006,8 +1459,11 @@ mod tests {
     use crate::remote_software::{
         DetectionRule, InstallMode, InstallerType, RemoteSoftwareStatus,
     };
+    use std::cell::RefCell;
+    use std::ffi::OsString;
     use std::io::{self, Cursor, Read};
     use std::path::{Path, PathBuf};
+    use std::rc::Rc;
 
     fn test_msi_manifest() -> RemoteSoftwareManifest {
         RemoteSoftwareManifest {
@@ -1545,6 +2001,306 @@ mod tests {
         )
         .unwrap();
         assert!(store.load().unwrap().entries.is_empty());
+        assert_eq!(fs::read(&verified).unwrap(), b"verified-package");
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[derive(Clone)]
+    struct TestWorkerStore {
+        root: PathBuf,
+        state: RecoveryState,
+        events: Rc<RefCell<Vec<&'static str>>>,
+        saved: Rc<RefCell<Vec<RecoveryState>>>,
+    }
+
+    impl WorkerStateStore for TestWorkerStore {
+        fn remove_stale_part_files(&mut self) -> Result<(), RemoteSoftwareError> {
+            self.events.borrow_mut().push("cleanup");
+            Ok(())
+        }
+
+        fn load(&mut self) -> Result<RecoveryState, RemoteSoftwareError> {
+            self.events.borrow_mut().push("load");
+            Ok(self.state.clone())
+        }
+
+        fn save(&mut self, state: &RecoveryState) -> Result<(), RemoteSoftwareError> {
+            self.events.borrow_mut().push("save");
+            self.state = state.clone();
+            self.saved.borrow_mut().push(state.clone());
+            Ok(())
+        }
+
+        fn package_root(&self) -> PathBuf {
+            self.root.join("packages")
+        }
+    }
+
+    fn test_worker_store(label: &str) -> TestWorkerStore {
+        let root = unique_test_path(label, "dir");
+        let events = Rc::new(RefCell::new(Vec::new()));
+        let saved = Rc::new(RefCell::new(Vec::new()));
+        let mut entry = test_state_entry(&root);
+        entry.last_result = None;
+        entry.attempt_timestamps.clear();
+        entry.failure_count = 0;
+        entry.paused = false;
+        TestWorkerStore {
+            state: RecoveryState {
+                entries: vec![entry],
+            },
+            root,
+            events,
+            saved,
+        }
+    }
+
+    fn failed_worker_status(request_id: &str) -> RemoteSoftwareStatus {
+        RemoteSoftwareStatus {
+            request_id: request_id.into(),
+            stage: RemoteSoftwareStage::Failed,
+            message: "installer_busy".into(),
+            exit_code: None,
+            needs_reboot: false,
+            progress_percent: None,
+        }
+    }
+
+    #[test]
+    fn worker_startup_orders_cleanup_load_then_runs_five_minute_checks() {
+        let mut store = test_worker_store("worker-startup-order");
+        let events = store.events.clone();
+        let waits = Rc::new(RefCell::new(Vec::new()));
+        let waits_seen = waits.clone();
+        let mut detections = 0;
+        run_worker_loop(
+            &mut store,
+            &WorkerStop::default(),
+            || 1_789_000_000,
+            move |duration, _| {
+                waits_seen.borrow_mut().push(duration);
+                waits_seen.borrow().len() == 1
+            },
+            |_| {
+                detections += 1;
+                events.borrow_mut().push("detect");
+                Ok(true)
+            },
+            |_| panic!("installed entry must not execute"),
+        )
+        .unwrap();
+        assert_eq!(&store.events.borrow()[..3], ["cleanup", "load", "detect"]);
+        assert_eq!(detections, 2);
+        assert_eq!(
+            *waits.borrow(),
+            [Duration::from_secs(5 * 60), Duration::from_secs(5 * 60)]
+        );
+    }
+
+    #[test]
+    fn worker_executes_only_missing_entries_and_resets_success() {
+        let mut store = test_worker_store("worker-missing-execute");
+        let request_id = store.state.entries[0].manifest.request_id.clone();
+        let mut executions = 0;
+        run_worker_loop(
+            &mut store,
+            &WorkerStop::default(),
+            || 1_789_000_000,
+            |_, _| false,
+            |_| Ok(false),
+            |_| {
+                executions += 1;
+                Some(RemoteSoftwareStatus {
+                    request_id: request_id.clone(),
+                    stage: RemoteSoftwareStage::Success,
+                    message: String::new(),
+                    exit_code: Some(0),
+                    needs_reboot: false,
+                    progress_percent: Some(100),
+                })
+            },
+        )
+        .unwrap();
+        assert_eq!(executions, 1);
+        let entry = &store.state.entries[0];
+        assert_eq!(entry.failure_count, 0);
+        assert!(entry.attempt_timestamps.is_empty());
+        assert!(!entry.paused);
+        assert_eq!(entry.last_result.as_ref().unwrap().stage, RemoteSoftwareStage::Success);
+    }
+
+    #[test]
+    fn retry_schedule_applies_backoff_hourly_limit_and_pause_until_restart() {
+        let root = unique_test_path("worker-retry-policy", "dir");
+        let mut entry = test_state_entry(&root);
+        entry.attempt_timestamps.clear();
+        entry.failure_count = 0;
+        entry.paused = false;
+        for (now, next) in [(0, 300), (300, 1_200)] {
+            assert_eq!(attempt_decision(&entry, now), AttemptDecision::Ready);
+            record_attempt_started(&mut entry, now);
+            let request_id = entry.manifest.request_id.clone();
+            apply_execution_result(
+                &mut entry,
+                failed_worker_status(&request_id),
+                now,
+            );
+            assert_eq!(attempt_decision(&entry, now), AttemptDecision::WaitUntil(next));
+        }
+        assert_eq!(attempt_decision(&entry, 1_200), AttemptDecision::Ready);
+        record_attempt_started(&mut entry, 1_200);
+        let request_id = entry.manifest.request_id.clone();
+        apply_execution_result(
+            &mut entry,
+            failed_worker_status(&request_id),
+            1_200,
+        );
+        assert!(entry.paused);
+        assert_eq!(attempt_decision(&entry, 3_000), AttemptDecision::Paused);
+        assert_eq!(attempt_decision(&entry, 3_600), AttemptDecision::Paused);
+        reset_paused_for_restart(&mut entry);
+        assert!(!entry.paused);
+        assert_eq!(entry.failure_count, 0);
+        assert!(entry.attempt_timestamps.is_empty());
+        assert_eq!(attempt_decision(&entry, 3_600), AttemptDecision::Ready);
+    }
+
+    #[test]
+    fn retry_delay_index_follows_completed_failure_count() {
+        let root = unique_test_path("worker-retry-index", "dir");
+        let mut entry = test_state_entry(&root);
+        entry.paused = false;
+        for (failure_count, last_attempt, expected_due) in
+            [(1, 0, 300), (2, 300, 1_200), (3, 1_200, 3_000)]
+        {
+            entry.failure_count = failure_count;
+            entry.attempt_timestamps = vec![last_attempt];
+            assert_eq!(
+                attempt_decision(&entry, last_attempt),
+                AttemptDecision::WaitUntil(expected_due)
+            );
+        }
+    }
+
+    #[test]
+    fn installed_detection_records_status_and_clears_failure_window() {
+        let mut store = test_worker_store("worker-installed-reset");
+        run_worker_loop(
+            &mut store,
+            &WorkerStop::default(),
+            || 1_789_000_000,
+            |_, _| false,
+            |_| Ok(true),
+            |_| panic!("installed entry must not execute"),
+        )
+        .unwrap();
+        let entry = &store.state.entries[0];
+        assert_eq!(entry.failure_count, 0);
+        assert!(entry.attempt_timestamps.is_empty());
+        assert!(!entry.paused);
+        let status = entry.last_result.as_ref().unwrap();
+        assert_eq!(status.stage, RemoteSoftwareStage::AlreadyInstalled);
+        assert_eq!(status.message, "already_installed");
+    }
+
+    #[test]
+    fn stopped_worker_exits_before_cleanup_or_execution() {
+        let stop = WorkerStop::default();
+        stop.stop();
+        assert!(!stop.wait(Duration::from_secs(5 * 60)));
+        let mut store = test_worker_store("worker-stopped");
+        run_worker_loop(
+            &mut store,
+            &stop,
+            || 1_789_000_000,
+            |_, _| panic!("stopped worker must not wait"),
+            |_| panic!("stopped worker must not detect"),
+            |_| panic!("stopped worker must not execute"),
+        )
+        .unwrap();
+        assert!(store.events.borrow().is_empty());
+    }
+
+    #[test]
+    fn stop_after_detection_prevents_a_new_install_attempt() {
+        let stop = WorkerStop::default();
+        let mut store = test_worker_store("worker-stop-before-execute");
+        run_worker_loop(
+            &mut store,
+            &stop,
+            || 1_789_000_000,
+            |_, _| false,
+            |_| {
+                stop.stop();
+                Ok(false)
+            },
+            |_| panic!("stop after detection must prevent execute"),
+        )
+        .unwrap();
+        assert_eq!(store.state.entries[0].failure_count, 0);
+        assert!(store.state.entries[0].attempt_timestamps.is_empty());
+    }
+
+    #[test]
+    fn worker_entry_gate_requires_windows_installed_exact_service_process() {
+        let service = vec![OsString::from("--service")];
+        assert!(worker_entry_allowed(true, true, true, &service));
+        for (windows, installed, available, args) in [
+            (false, true, true, service.clone()),
+            (true, false, true, service.clone()),
+            (true, true, false, service.clone()),
+            (true, true, true, Vec::new()),
+            (true, true, true, vec![OsString::from("--portable-service")]),
+            (true, true, true, vec![OsString::from("--service"), OsString::from("--server")]),
+        ] {
+            assert!(!worker_entry_allowed(windows, installed, available, &args));
+        }
+    }
+
+    #[test]
+    fn invalid_loaded_entry_is_removed_before_detection_or_execution() {
+        let mut store = test_worker_store("worker-invalid-entry");
+        store.state.entries[0].verified_package_path = store.root.join("outside.exe");
+        run_worker_loop(
+            &mut store,
+            &WorkerStop::default(),
+            || 1_789_000_000,
+            |_, _| false,
+            |_| panic!("invalid entry must not detect"),
+            |_| panic!("invalid entry must not execute"),
+        )
+        .unwrap();
+        assert!(store.state.entries.is_empty());
+        assert_eq!(store.saved.borrow().last().unwrap().entries.len(), 0);
+    }
+
+    #[test]
+    fn missing_terminal_observer_status_keeps_state_and_verified_package() {
+        let (root, mut store) = test_state_store("worker-observer-disappeared");
+        let mut entry = test_state_entry(&root);
+        entry.attempt_timestamps.clear();
+        entry.failure_count = 0;
+        entry.paused = false;
+        let verified = entry.verified_package_path.clone();
+        fs::write(&verified, b"verified-package").unwrap();
+        store
+            .save(&RecoveryState {
+                entries: vec![entry],
+            })
+            .unwrap();
+        run_worker_loop(
+            &mut store,
+            &WorkerStop::default(),
+            || 1_789_000_000,
+            |_, _| false,
+            |_| Ok(false),
+            |_| None,
+        )
+        .unwrap();
+        let loaded = store.load().unwrap();
+        assert_eq!(loaded.entries.len(), 1);
+        assert_eq!(loaded.entries[0].failure_count, 1);
+        assert_eq!(loaded.entries[0].last_result.as_ref().unwrap().stage, RemoteSoftwareStage::Failed);
         assert_eq!(fs::read(&verified).unwrap(), b"verified-package");
         fs::remove_dir_all(root).unwrap();
     }
