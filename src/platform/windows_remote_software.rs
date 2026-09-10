@@ -16,7 +16,7 @@ use std::{
     time::Duration,
 };
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 use std::sync::Arc;
 
 #[cfg(windows)]
@@ -364,6 +364,15 @@ impl WorkerStop {
         self.stopped.lock().map(|stopped| *stopped).unwrap_or(true)
     }
 
+    fn try_begin_execution(&self) -> Option<WorkerExecutionGuard<'_>> {
+        let stopped = self.stopped.lock().ok()?;
+        if *stopped {
+            None
+        } else {
+            Some(WorkerExecutionGuard { _stop: self })
+        }
+    }
+
     fn wait(&self, duration: Duration) -> bool {
         let stopped = match self.stopped.lock() {
             Ok(stopped) => stopped,
@@ -377,6 +386,10 @@ impl WorkerStop {
             .map(|(stopped, _)| !*stopped)
             .unwrap_or(false)
     }
+}
+
+struct WorkerExecutionGuard<'a> {
+    _stop: &'a WorkerStop,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -565,6 +578,10 @@ where
         record_attempt_started(&mut state.entries[index], now);
         let manifest = state.entries[index].manifest.clone();
         store.save(state)?;
+        let _execution = match stop.try_begin_execution() {
+            Some(execution) => execution,
+            None => break,
+        };
         let status = execute_entry(manifest.clone())
             .filter(|status| result_succeeded(&status.stage) || status.stage == RemoteSoftwareStage::Failed)
             .unwrap_or_else(|| missing_terminal_status(&manifest.request_id));
@@ -2092,6 +2109,7 @@ mod tests {
         state: RecoveryState,
         events: Rc<RefCell<Vec<&'static str>>>,
         saved: Rc<RefCell<Vec<RecoveryState>>>,
+        stop_on_queued_save: Option<Rc<WorkerStop>>,
     }
 
     impl WorkerStateStore for TestWorkerStore {
@@ -2109,6 +2127,18 @@ mod tests {
             self.events.borrow_mut().push("save");
             self.state = state.clone();
             self.saved.borrow_mut().push(state.clone());
+            let queued = state.entries.iter().any(|entry| {
+                entry
+                    .last_result
+                    .as_ref()
+                    .map(|status| status.stage == RemoteSoftwareStage::Queued)
+                    .unwrap_or(false)
+            });
+            if queued {
+                if let Some(stop) = &self.stop_on_queued_save {
+                    stop.stop();
+                }
+            }
             Ok(())
         }
 
@@ -2133,6 +2163,7 @@ mod tests {
             root,
             events,
             saved,
+            stop_on_queued_save: None,
         }
     }
 
@@ -2320,6 +2351,33 @@ mod tests {
         .unwrap();
         assert_eq!(store.state.entries[0].failure_count, 0);
         assert!(store.state.entries[0].attempt_timestamps.is_empty());
+    }
+
+    #[test]
+    fn stop_after_queued_state_save_blocks_execution_gate() {
+        let stop = Rc::new(WorkerStop::default());
+        let mut store = test_worker_store("worker-stop-after-save");
+        store.stop_on_queued_save = Some(stop.clone());
+        let mut executions = 0;
+        run_worker_loop(
+            &mut store,
+            &stop,
+            || 1_789_000_000,
+            |_, _| false,
+            |_| Ok(false),
+            |_| {
+                executions += 1;
+                Some(failed_worker_status("must-not-run"))
+            },
+        )
+        .unwrap();
+        assert_eq!(executions, 0);
+        assert!(stop.is_stopped());
+        assert_eq!(store.state.entries[0].failure_count, 1);
+        assert_eq!(
+            store.state.entries[0].last_result.as_ref().unwrap().stage,
+            RemoteSoftwareStage::Queued
+        );
     }
 
     #[test]
