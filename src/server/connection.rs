@@ -22,6 +22,10 @@ use crate::{
     },
     display_service, ipc, privacy_mode, video_service, VERSION,
 };
+use crate::remote_software::{
+    validate_manifest, DetectionRule, InstallMode, InstallerType, RemoteSoftwareError,
+    RemoteSoftwareManifest, RemoteSoftwareStage, RemoteSoftwareStatus,
+};
 #[cfg(any(target_os = "android", target_os = "ios"))]
 use crate::{common::DEVICE_NAME, flutter::connection_manager::start_channel};
 use cidr_utils::cidr::IpCidr;
@@ -38,6 +42,7 @@ use hbb_common::{
     get_time, get_version_number,
     message_proto::{option_message::BoolOption, permission_info::Permission},
     password_security::{self as password, ApproveMode},
+    protobuf::Enum,
     sha2::{Digest, Sha256},
     sleep, timeout,
     tokio::{
@@ -70,6 +75,17 @@ use windows::Win32::Foundation::{CloseHandle, HANDLE};
 #[cfg(windows)]
 use crate::virtual_display_manager;
 pub type Sender = mpsc::UnboundedSender<(Instant, Arc<Message>)>;
+
+enum SoftwareInstallEvent {
+    Status(RemoteSoftwareStatus),
+    Finished(String),
+}
+
+#[cfg(windows)]
+struct ActiveSoftwareInstall {
+    request_id: String,
+    task: tokio::task::JoinHandle<()>,
+}
 
 const FAILURE_IDX_ID_WHITELIST: usize = 2;
 // How long a rejection counts, so also how long a blocked address stays blocked. Longer
@@ -351,6 +367,10 @@ pub struct Connection {
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
     terminal_user_token: Option<TerminalUserToken>,
     terminal_generic_service: Option<Box<GenericService>>,
+    #[cfg(windows)]
+    software_install: Option<ActiveSoftwareInstall>,
+    #[cfg(windows)]
+    software_install_request_ids: HashSet<String>,
 }
 
 impl ConnInner {
@@ -441,6 +461,8 @@ impl Connection {
         let (tx_video, mut rx_video) = mpsc::unbounded_channel::<(Instant, Arc<Message>)>();
         let (tx_input, _rx_input) = std_mpsc::channel();
         let (tx_from_authed, mut rx_from_authed) = mpsc::unbounded_channel::<ipc::Data>();
+        let (tx_software_install, mut rx_software_install) =
+            mpsc::unbounded_channel::<SoftwareInstallEvent>();
         let mut hbbs_rx = crate::hbbs_http::sync::signal_receiver();
         let (tx_post_seq, rx_post_seq) = mpsc::unbounded_channel();
         tokio::spawn(async move {
@@ -543,6 +565,10 @@ impl Connection {
             #[cfg(not(any(target_os = "android", target_os = "ios")))]
             terminal_user_token: None,
             terminal_generic_service: None,
+            #[cfg(windows)]
+            software_install: None,
+            #[cfg(windows)]
+            software_install_request_ids: HashSet::new(),
             conn_audit_primary_auth: ConnAuditPrimaryAuth::None,
             conn_audit_two_factor: ConnAuditTwoFactor::None,
         };
@@ -887,6 +913,9 @@ impl Connection {
                         _ => {}
                     }
                 },
+                Some(event) = rx_software_install.recv() => {
+                    conn.handle_software_install_event(event);
+                },
                 res = conn.stream.next() => {
                     if let Some(res) = res {
                         match res {
@@ -898,7 +927,7 @@ impl Connection {
                                 last_recv_time = Instant::now();
                                 conn.session_last_recv_time.as_mut().map(|t| *t.lock().unwrap() = Instant::now());
                                 if let Ok(msg_in) = Message::parse_from_bytes(&bytes) {
-                                    if !conn.on_message(msg_in).await {
+                                    if !conn.on_message(msg_in, &tx_software_install).await {
                                         break;
                                     }
                                     if conn.port_forward_socket.is_some() && conn.authorized {
@@ -1938,7 +1967,7 @@ impl Connection {
             self.is_remote(),
             Config::get_bool_option(keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL),
             &self.control_permissions,
-            crate::platform::windows::is_self_service_running(),
+            crate::platform::windows_remote_software::service_is_available(),
         );
         #[cfg(not(target_os = "windows"))]
         let software_install = false;
@@ -2725,7 +2754,178 @@ impl Connection {
         }
     }
 
-    async fn on_message(&mut self, msg: Message) -> bool {
+    fn handle_software_install_event(&mut self, event: SoftwareInstallEvent) {
+        match event {
+            SoftwareInstallEvent::Status(status) => {
+                #[cfg(windows)]
+                if self
+                    .software_install
+                    .as_ref()
+                    .is_some_and(|job| job.request_id == status.request_id)
+                {
+                    update_recovery_entry_status(&status);
+                    let mut message = Message::new();
+                    message.set_software_install_status(software_install_status_from_domain(status));
+                    self.inner.send(message.into());
+                }
+                #[cfg(not(windows))]
+                let _ = status;
+            }
+            SoftwareInstallEvent::Finished(request_id) => {
+                #[cfg(windows)]
+                if cancel_matches_active_request(
+                    self.software_install
+                        .as_ref()
+                        .map(|job| job.request_id.as_str()),
+                    &request_id,
+                ) {
+                    self.software_install.take();
+                }
+                #[cfg(not(windows))]
+                let _ = request_id;
+            }
+        }
+    }
+
+    fn send_software_install_failure(&mut self, request_id: String, message: &'static str) {
+        let mut response = Message::new();
+        response.set_software_install_status(failed_software_install_status(request_id, message));
+        self.inner.send(response.into());
+    }
+
+    fn handle_software_install_action(
+        &mut self,
+        action: SoftwareInstallAction,
+        software_install_events: &mpsc::UnboundedSender<SoftwareInstallEvent>,
+    ) {
+        match action.union {
+            Some(software_install_action::Union::Request(request)) => {
+                self.handle_software_install_request(request, software_install_events);
+            }
+            Some(software_install_action::Union::Cancel(cancel)) => {
+                self.handle_software_install_cancel(cancel.request_id);
+            }
+            None => {}
+        }
+    }
+
+    fn handle_software_install_request(
+        &mut self,
+        request: SoftwareInstallRequest,
+        software_install_events: &mpsc::UnboundedSender<SoftwareInstallEvent>,
+    ) {
+        let request_id = request.request_id.clone();
+        #[cfg(windows)]
+        let service_available = crate::platform::windows_remote_software::service_is_available();
+        #[cfg(not(windows))]
+        let service_available = false;
+        let denial = software_install_request_denial(
+            self.authorized,
+            self.authed_conn_type(),
+            Config::get_bool_option(keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL),
+            Self::permission(
+                keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
+                &self.control_permissions,
+            ),
+            service_available,
+        );
+        if let Some(message) = denial {
+            self.send_software_install_failure(request_id, message);
+            return;
+        }
+
+        let manifest = match remote_software_manifest_from_request(&request) {
+            Ok(manifest) => manifest,
+            Err(error) => {
+                log::warn!("Rejected remote software install request: {error}");
+                self.send_software_install_failure(request_id, "invalid_manifest");
+                return;
+            }
+        };
+
+        #[cfg(not(windows))]
+        {
+            let _ = manifest;
+            let _ = software_install_events;
+            self.send_software_install_failure(request_id, "service_required");
+            return;
+        }
+
+        #[cfg(windows)]
+        {
+            if self
+                .software_install_request_ids
+                .contains(&manifest.request_id)
+            {
+                return;
+            }
+            if self.software_install.is_some() {
+                self.send_software_install_failure(request_id, "installer_busy");
+                return;
+            }
+            if should_persist_recovery_entry(&manifest) {
+                match reserve_recovery_entry(&manifest) {
+                    Ok(true) => {}
+                    Ok(false) => {
+                        // A persisted request id is already owned by the self-heal lifecycle.
+                        // Do not execute it a second time from this connection.
+                        self.software_install_request_ids.insert(manifest.request_id);
+                        return;
+                    }
+                    Err(error) => {
+                        log::error!("Failed to reserve remote software recovery entry: {error}");
+                        self.send_software_install_failure(request_id, "state_failed");
+                        return;
+                    }
+                }
+            }
+
+            let request_id = manifest.request_id.clone();
+            let task_request_id = request_id.clone();
+            let event_tx = software_install_events.clone();
+            let task = tokio::spawn(async move {
+                let callback_tx = event_tx.clone();
+                crate::platform::windows_remote_software::execute(manifest, move |status| {
+                    let _ = callback_tx.send(SoftwareInstallEvent::Status(status));
+                })
+                .await;
+                let _ = event_tx.send(SoftwareInstallEvent::Finished(task_request_id));
+            });
+            self.software_install_request_ids.insert(request_id.clone());
+            self.software_install = Some(ActiveSoftwareInstall { request_id, task });
+        }
+    }
+
+    fn handle_software_install_cancel(&mut self, request_id: String) {
+        if !self.authorized || self.authed_conn_type() != Some(AuthConnType::Remote) {
+            self.send_software_install_failure(request_id, "permission_denied");
+            return;
+        }
+        #[cfg(windows)]
+        if cancel_matches_active_request(
+            self.software_install
+                .as_ref()
+                .map(|job| job.request_id.as_str()),
+            &request_id,
+        ) {
+            // Abort only the async observation wrapper. The installer worker owns its external
+            // process and cache/state handles, so cancellation never kills or cleans them up.
+            self.cancel_software_install();
+        }
+    }
+
+    fn cancel_software_install(&mut self) {
+        #[cfg(windows)]
+        if let Some(active) = self.software_install.take() {
+            active.task.abort();
+        }
+    }
+
+    async fn on_message(
+        &mut self,
+        msg: Message,
+        software_install_events: &mpsc::UnboundedSender<SoftwareInstallEvent>,
+    ) -> bool {
         if let Some(message::Union::Misc(misc)) = &msg.union {
             // Move the CloseReason forward, as this message needs to be received when unauthorized, especially for kcp.
             if let Some(misc::Union::CloseReason(s)) = &misc.union {
@@ -2739,8 +2939,15 @@ impl Connection {
             if matches!(msg.union.as_ref(), Some(message::Union::LoginRequest(_))) {
                 return true;
             }
-            if let Some(message) = self.authorized_scope_violation(&msg) {
-                return self.handle_authorized_scope_violation(message).await;
+            // Software installation is handled below so every rejection can retain the request
+            // id in a typed status, including an authenticated non-remote session.
+            if !matches!(
+                msg.union.as_ref(),
+                Some(message::Union::SoftwareInstallAction(_))
+            ) {
+                if let Some(message) = self.authorized_scope_violation(&msg) {
+                    return self.handle_authorized_scope_violation(message).await;
+                }
             }
         }
         // After handling CloseReason messages, proceed to process other message types
@@ -3026,6 +3233,8 @@ impl Connection {
                     }
                 }
             }
+        } else if let Some(message::Union::SoftwareInstallAction(action)) = msg.union {
+            self.handle_software_install_action(action, software_install_events);
         } else if self.authorized {
             if self.port_forward_socket.is_some() {
                 return true;
@@ -5104,6 +5313,7 @@ impl Connection {
             return;
         }
         self.closed = true;
+        self.cancel_software_install();
         // If voice A,B -> C, and A,B has voice call
         // B disconnects, C will reset the voice call input.
         //
@@ -6129,6 +6339,241 @@ fn software_install_capability(
         && service_running
 }
 
+fn installation_denial(
+    policy_enabled: bool,
+    permission_enabled: bool,
+    service_available: bool,
+) -> Option<&'static str> {
+    if !policy_enabled || !permission_enabled {
+        Some("permission_denied")
+    } else if !service_available {
+        Some("service_required")
+    } else {
+        None
+    }
+}
+
+fn software_install_request_denial(
+    authorized: bool,
+    conn_type: Option<AuthConnType>,
+    policy_enabled: bool,
+    permission_enabled: bool,
+    service_available: bool,
+) -> Option<&'static str> {
+    if !authorized || conn_type != Some(AuthConnType::Remote) {
+        Some("permission_denied")
+    } else {
+        installation_denial(policy_enabled, permission_enabled, service_available)
+    }
+}
+
+fn remote_software_manifest_from_request(
+    request: &SoftwareInstallRequest,
+) -> Result<RemoteSoftwareManifest, RemoteSoftwareError> {
+    let installer_type = match request.installer_type.enum_value() {
+        Ok(SoftwareInstallerType::Msi) => InstallerType::Msi,
+        Ok(SoftwareInstallerType::Exe) => InstallerType::Exe,
+        _ => {
+            return Err(RemoteSoftwareError::InvalidManifest(
+                "unknown installer type".into(),
+            ))
+        }
+    };
+    let detection_rule = match request.detection_type.enum_value() {
+        Ok(SoftwareDetectionType::MsiProductCode) => {
+            DetectionRule::MsiProductCode(request.detection_value.clone())
+        }
+        Ok(SoftwareDetectionType::UninstallDisplayName) => {
+            DetectionRule::UninstallDisplayName(request.detection_value.clone())
+        }
+        Ok(SoftwareDetectionType::ExePath) => DetectionRule::ExePath(request.detection_value.clone()),
+        _ => {
+            return Err(RemoteSoftwareError::InvalidManifest(
+                "unknown detection type".into(),
+            ))
+        }
+    };
+    let mode = match request.mode.enum_value() {
+        Ok(SoftwareInstallMode::DownloadOnly) => InstallMode::DownloadOnly,
+        Ok(SoftwareInstallMode::DownloadAndInstall) => InstallMode::DownloadAndInstall,
+        _ => {
+            return Err(RemoteSoftwareError::InvalidManifest(
+                "unknown install mode".into(),
+            ))
+        }
+    };
+    let manifest = RemoteSoftwareManifest {
+        request_id: request.request_id.clone(),
+        software_name: request.software_name.clone(),
+        package_url: request.package_url.clone(),
+        sha256: request.sha256.clone(),
+        installer_type,
+        detection_rule,
+        silent_args: request.silent_args.clone(),
+        mode,
+    };
+    validate_manifest(&manifest)?;
+    Ok(manifest)
+}
+
+fn software_install_status_from_domain(status: RemoteSoftwareStatus) -> SoftwareInstallStatus {
+    let stage = match (&status.stage, status.message.as_str()) {
+        (&RemoteSoftwareStage::Success, "downloaded") => SoftwareInstallStage::Downloaded,
+        (&RemoteSoftwareStage::Queued, _) => SoftwareInstallStage::Queued,
+        (&RemoteSoftwareStage::Downloading, _) => SoftwareInstallStage::Downloading,
+        (&RemoteSoftwareStage::Verifying, _) => SoftwareInstallStage::Verifying,
+        (&RemoteSoftwareStage::Detecting, _) => SoftwareInstallStage::Detecting,
+        (&RemoteSoftwareStage::Installing, _) => SoftwareInstallStage::Installing,
+        (&RemoteSoftwareStage::AlreadyInstalled, _) => SoftwareInstallStage::AlreadyInstalled,
+        (&RemoteSoftwareStage::Success, _) => SoftwareInstallStage::Success,
+        (&RemoteSoftwareStage::NeedsReboot, _) => SoftwareInstallStage::NeedsReboot,
+        (&RemoteSoftwareStage::Failed, _) => SoftwareInstallStage::Failed,
+    };
+    let mut wire_status = SoftwareInstallStatus::new();
+    wire_status.request_id = status.request_id;
+    wire_status.stage = stage.into();
+    wire_status.message = status.message;
+    wire_status.exit_code = status.exit_code;
+    wire_status.needs_reboot = status.needs_reboot;
+    wire_status.progress_percent = status.progress_percent.map(u32::from);
+    wire_status
+}
+
+fn failed_software_install_status(
+    request_id: impl Into<String>,
+    message: impl Into<String>,
+) -> SoftwareInstallStatus {
+    let mut status = SoftwareInstallStatus::new();
+    status.request_id = request_id.into();
+    status.stage = SoftwareInstallStage::Failed.into();
+    status.message = message.into();
+    status
+}
+
+fn cancel_matches_active_request(
+    active_request_id: Option<&str>,
+    requested_request_id: &str,
+) -> bool {
+    active_request_id == Some(requested_request_id)
+}
+
+fn should_persist_recovery_entry(manifest: &RemoteSoftwareManifest) -> bool {
+    matches!(&manifest.mode, &InstallMode::DownloadAndInstall)
+}
+
+#[cfg(any(windows, test))]
+fn recovery_entry_for_manifest(
+    package_root: &std::path::Path,
+    manifest: &RemoteSoftwareManifest,
+    now: u64,
+) -> crate::platform::windows_remote_software::RecoveryEntry {
+    let extension = match &manifest.installer_type {
+        &InstallerType::Msi => "msi",
+        &InstallerType::Exe => "exe",
+    };
+    crate::platform::windows_remote_software::RecoveryEntry {
+        manifest: manifest.clone(),
+        verified_package_path: package_root.join(format!(
+            "{}.{}",
+            manifest.sha256.to_ascii_lowercase(),
+            extension
+        )),
+        last_result: Some(RemoteSoftwareStatus {
+            request_id: manifest.request_id.clone(),
+            stage: RemoteSoftwareStage::Queued,
+            message: "remote_install".into(),
+            exit_code: None,
+            needs_reboot: false,
+            progress_percent: Some(0),
+        }),
+        attempt_timestamps: vec![now],
+        failure_count: 1,
+        paused: false,
+    }
+}
+
+#[cfg(any(windows, test))]
+fn upsert_recovery_entry(
+    state: &mut crate::platform::windows_remote_software::RecoveryState,
+    entry: crate::platform::windows_remote_software::RecoveryEntry,
+) -> bool {
+    if let Some(existing) = state
+        .entries
+        .iter_mut()
+        .find(|existing| existing.manifest.request_id == entry.manifest.request_id)
+    {
+        *existing = entry;
+        false
+    } else {
+        state.entries.push(entry);
+        true
+    }
+}
+
+#[cfg(windows)]
+fn reserve_recovery_entry(manifest: &RemoteSoftwareManifest) -> Result<bool, String> {
+    let store = crate::platform::windows_remote_software::StateStore::production()
+        .map_err(|error| error.to_string())?;
+    let mut state = store.load().map_err(|error| error.to_string())?;
+    if state
+        .entries
+        .iter()
+        .any(|entry| entry.manifest.request_id == manifest.request_id)
+    {
+        return Ok(false);
+    }
+    let entry = recovery_entry_for_manifest(
+        &store.package_root(),
+        manifest,
+        std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .unwrap_or_default()
+            .as_secs(),
+    );
+    let inserted = upsert_recovery_entry(&mut state, entry);
+    debug_assert!(inserted);
+    store.save(&state).map_err(|error| error.to_string())?;
+    Ok(true)
+}
+
+#[cfg(windows)]
+fn update_recovery_entry_status(status: &RemoteSoftwareStatus) {
+    if !matches!(
+        &status.stage,
+        &RemoteSoftwareStage::AlreadyInstalled
+            | &RemoteSoftwareStage::Success
+            | &RemoteSoftwareStage::NeedsReboot
+            | &RemoteSoftwareStage::Failed
+    ) {
+        return;
+    }
+    let store = match crate::platform::windows_remote_software::StateStore::production() {
+        Ok(store) => store,
+        Err(error) => {
+            log::warn!("Failed to open remote software state for status update: {error}");
+            return;
+        }
+    };
+    let mut state = match store.load() {
+        Ok(state) => state,
+        Err(error) => {
+            log::warn!("Failed to load remote software state for status update: {error}");
+            return;
+        }
+    };
+    let Some(entry) = state
+        .entries
+        .iter_mut()
+        .find(|entry| entry.manifest.request_id == status.request_id)
+    else {
+        return;
+    };
+    entry.last_result = Some(status.clone());
+    if let Err(error) = store.save(&state) {
+        log::warn!("Failed to save remote software status update: {error}");
+    }
+}
+
 #[cfg(feature = "flutter")]
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
 pub fn insert_switch_sides_uuid(id: String, uuid: uuid::Uuid) {
@@ -6538,6 +6983,8 @@ impl Default for PortableState {
 
 impl Drop for Connection {
     fn drop(&mut self) {
+        self.cancel_software_install();
+
         #[cfg(not(any(target_os = "android", target_os = "ios")))]
         self.release_pressed_modifiers();
 
@@ -6975,6 +7422,7 @@ fn wildcard_match(pattern: &str, text: &str) -> bool {
 mod test {
     #[allow(unused)]
     use super::*;
+    use crate::platform::windows_remote_software::RecoveryState;
 
     #[cfg(feature = "flutter")]
     #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -7345,6 +7793,225 @@ mod test {
         assert!(!software_install_capability(true, false, &enabled, true));
         assert!(!software_install_capability(true, true, &None, true));
         assert!(!software_install_capability(true, true, &enabled, false));
+    }
+
+    #[test]
+    fn installation_denial_is_policy_permission_then_service_fail_closed() {
+        assert_eq!(installation_denial(false, false, true), Some("permission_denied"));
+        assert_eq!(installation_denial(true, false, true), Some("permission_denied"));
+        assert_eq!(installation_denial(false, true, true), Some("permission_denied"));
+        assert_eq!(installation_denial(true, true, false), Some("service_required"));
+        assert_eq!(installation_denial(true, true, true), None);
+    }
+
+    #[test]
+    fn software_install_request_denial_requires_authorized_remote_and_all_gates() {
+        assert_eq!(
+            software_install_request_denial(
+                false,
+                Some(AuthConnType::Remote),
+                true,
+                true,
+                true,
+            ),
+            Some("permission_denied")
+        );
+        assert_eq!(
+            software_install_request_denial(
+                true,
+                Some(AuthConnType::Terminal),
+                true,
+                true,
+                true,
+            ),
+            Some("permission_denied")
+        );
+        assert_eq!(
+            software_install_request_denial(true, None, true, true, true),
+            Some("permission_denied")
+        );
+        assert_eq!(
+            software_install_request_denial(
+                true,
+                Some(AuthConnType::Remote),
+                true,
+                true,
+                false,
+            ),
+            Some("service_required")
+        );
+        assert_eq!(
+            software_install_request_denial(
+                true,
+                Some(AuthConnType::Remote),
+                true,
+                true,
+                true,
+            ),
+            None
+        );
+    }
+
+    fn software_install_request() -> SoftwareInstallRequest {
+        SoftwareInstallRequest {
+            request_id: "request-4a".into(),
+            software_name: "Example".into(),
+            package_url: "https://update.szxinyu.com/packages/example.exe".into(),
+            sha256: "ab".repeat(32),
+            installer_type: SoftwareInstallerType::Exe.into(),
+            detection_type: SoftwareDetectionType::ExePath.into(),
+            detection_value: r"C:\Program Files\Example\example.exe".into(),
+            silent_args: vec!["/quiet".into(), "/norestart".into()],
+            mode: SoftwareInstallMode::DownloadAndInstall.into(),
+            ..Default::default()
+        }
+    }
+
+    #[test]
+    fn software_install_request_conversion_maps_fields_and_validates_before_execution() {
+        let request = software_install_request();
+        let manifest = remote_software_manifest_from_request(&request).unwrap();
+
+        assert_eq!(&manifest.request_id, &request.request_id);
+        assert_eq!(&manifest.software_name, &request.software_name);
+        assert_eq!(&manifest.package_url, &request.package_url);
+        assert_eq!(&manifest.sha256, &request.sha256);
+        assert_eq!(&manifest.installer_type, &InstallerType::Exe);
+        assert_eq!(
+            &manifest.detection_rule,
+            &DetectionRule::ExePath(request.detection_value.clone())
+        );
+        assert_eq!(&manifest.silent_args, &request.silent_args);
+        assert_eq!(&manifest.mode, &InstallMode::DownloadAndInstall);
+
+        let mut invalid_url = request.clone();
+        invalid_url.package_url = "http://update.szxinyu.com/example.exe".into();
+        assert!(remote_software_manifest_from_request(&invalid_url).is_err());
+
+        let mut unknown_installer = request;
+        unknown_installer.installer_type = SoftwareInstallerType::UnknownInstaller.into();
+        assert!(remote_software_manifest_from_request(&unknown_installer).is_err());
+    }
+
+    #[test]
+    fn software_install_status_conversion_maps_stages_and_preserves_request_id() {
+        let stages = [
+            (RemoteSoftwareStage::Queued, SoftwareInstallStage::Queued),
+            (
+                RemoteSoftwareStage::Downloading,
+                SoftwareInstallStage::Downloading,
+            ),
+            (
+                RemoteSoftwareStage::Verifying,
+                SoftwareInstallStage::Verifying,
+            ),
+            (
+                RemoteSoftwareStage::Detecting,
+                SoftwareInstallStage::Detecting,
+            ),
+            (
+                RemoteSoftwareStage::Installing,
+                SoftwareInstallStage::Installing,
+            ),
+            (
+                RemoteSoftwareStage::AlreadyInstalled,
+                SoftwareInstallStage::AlreadyInstalled,
+            ),
+            (RemoteSoftwareStage::Success, SoftwareInstallStage::Success),
+            (
+                RemoteSoftwareStage::NeedsReboot,
+                SoftwareInstallStage::NeedsReboot,
+            ),
+            (RemoteSoftwareStage::Failed, SoftwareInstallStage::Failed),
+        ];
+
+        for (domain_stage, wire_stage) in stages {
+            let status = software_install_status_from_domain(RemoteSoftwareStatus {
+                request_id: "request-4a".into(),
+                stage: domain_stage,
+                message: "status".into(),
+                exit_code: Some(3010),
+                needs_reboot: true,
+                progress_percent: Some(73),
+            });
+            assert_eq!(status.request_id, "request-4a");
+            assert_eq!(status.stage.enum_value(), Ok(wire_stage));
+            assert_eq!(status.message, "status");
+            assert_eq!(status.exit_code, Some(3010));
+            assert!(status.needs_reboot);
+            assert_eq!(status.progress_percent, Some(73));
+        }
+
+        let downloaded = software_install_status_from_domain(RemoteSoftwareStatus {
+            request_id: "request-4a".into(),
+            stage: RemoteSoftwareStage::Success,
+            message: "downloaded".into(),
+            exit_code: None,
+            needs_reboot: false,
+            progress_percent: None,
+        });
+        assert_eq!(
+            downloaded.stage.enum_value(),
+            Ok(SoftwareInstallStage::Downloaded)
+        );
+    }
+
+    #[test]
+    fn software_install_failure_status_preserves_original_request_id() {
+        let status = failed_software_install_status("request-4a", "permission_denied");
+        assert_eq!(status.request_id, "request-4a");
+        assert_eq!(status.stage.enum_value(), Ok(SoftwareInstallStage::Failed));
+        assert_eq!(status.message, "permission_denied");
+        assert_eq!(status.exit_code, None);
+    }
+
+    #[test]
+    fn software_install_cancel_only_matches_current_request_id() {
+        assert!(cancel_matches_active_request(Some("request-4a"), "request-4a"));
+        assert!(!cancel_matches_active_request(Some("request-4a"), "request-other"));
+        assert!(!cancel_matches_active_request(None, "request-4a"));
+    }
+
+    #[test]
+    fn recovery_entry_is_complete_and_download_only_is_not_persisted() {
+        let manifest = remote_software_manifest_from_request(&software_install_request()).unwrap();
+        let entry = recovery_entry_for_manifest(
+            std::path::Path::new("cache"),
+            &manifest,
+            1_757_488_000,
+        );
+
+        assert_eq!(entry.manifest, manifest);
+        assert_eq!(
+            entry.verified_package_path,
+            PathBuf::from("cache").join(format!("{}.exe", "ab".repeat(32)))
+        );
+        assert_eq!(entry.last_result.as_ref().unwrap().request_id, "request-4a");
+        assert_eq!(
+            &entry.last_result.as_ref().unwrap().stage,
+            &RemoteSoftwareStage::Queued
+        );
+        assert_eq!(entry.attempt_timestamps, vec![1_757_488_000]);
+        assert_eq!(entry.failure_count, 1);
+        assert!(!entry.paused);
+
+        let mut download_only = manifest;
+        download_only.mode = InstallMode::DownloadOnly;
+        assert!(!should_persist_recovery_entry(&download_only));
+    }
+
+    #[test]
+    fn recovery_entry_upsert_updates_by_request_id_without_duplicates() {
+        let manifest = remote_software_manifest_from_request(&software_install_request()).unwrap();
+        let entry = recovery_entry_for_manifest(std::path::Path::new("cache"), &manifest, 1);
+        let mut state = RecoveryState::default();
+
+        assert!(upsert_recovery_entry(&mut state, entry.clone()));
+        let mut updated = entry;
+        updated.failure_count = 2;
+        assert!(!upsert_recovery_entry(&mut state, updated));
+        assert_eq!(state.entries.len(), 1);
+        assert_eq!(state.entries[0].failure_count, 2);
     }
 
     fn assert_scopes(
