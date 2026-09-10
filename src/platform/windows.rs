@@ -1552,6 +1552,79 @@ fn get_install_info_with_subkey(subkey: String) -> (String, String, String, Stri
     (subkey, path, start_menu, exe)
 }
 
+const LEGACY_SHORTCUT_DISPLAY_NAME: &str = "RustDesk";
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct ShortcutNames {
+    internal: String,
+    display: String,
+    legacy: Option<String>,
+}
+
+fn shortcut_names_for(internal: &str, display: &str) -> ResultType<ShortcutNames> {
+    validate_install_value(display)?;
+    Ok(ShortcutNames {
+        internal: internal.to_owned(),
+        display: display.to_owned(),
+        legacy: (display != LEGACY_SHORTCUT_DISPLAY_NAME)
+            .then(|| LEGACY_SHORTCUT_DISPLAY_NAME.to_owned()),
+    })
+}
+
+fn get_shortcut_names() -> ResultType<ShortcutNames> {
+    shortcut_names_for(&crate::get_app_name(), &crate::common::get_display_name())
+}
+
+fn shortcut_start_menu_path(name: &str) -> String {
+    format!(
+        "%ProgramData%\\Microsoft\\Windows\\Start Menu\\Programs\\{}",
+        name
+    )
+}
+
+fn shortcut_cleanup_names(names: &ShortcutNames, include_current: bool) -> Vec<&str> {
+    let mut result = Vec::new();
+    if include_current {
+        result.push(names.display.as_str());
+    }
+    if names.internal != names.display {
+        result.push(names.internal.as_str());
+    }
+    if let Some(legacy) = names.legacy.as_deref() {
+        if !result.contains(&legacy) {
+            result.push(legacy);
+        }
+    }
+    result
+}
+
+fn shortcut_tray_cleanup_commands(names: &ShortcutNames, include_current: bool) -> String {
+    shortcut_cleanup_names(names, include_current)
+        .into_iter()
+        .map(|name| {
+            format!(
+                "if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{name} Tray.lnk\" del /f /q \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{name} Tray.lnk\"\n"
+            )
+        })
+        .collect()
+}
+
+fn shortcut_cleanup_commands(names: &ShortcutNames, include_current: bool) -> String {
+    let mut commands: String = shortcut_cleanup_names(names, include_current)
+        .into_iter()
+        .map(|name| {
+            format!(
+                "if exist \"%PUBLIC%\\Desktop\\{name}.lnk\" del /f /q \"%PUBLIC%\\Desktop\\{name}.lnk\"\n\
+if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{name}\\{name}.lnk\" del /f /q \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{name}\\{name}.lnk\"\n\
+if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{name}\\Uninstall {name}.lnk\" del /f /q \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{name}\\Uninstall {name}.lnk\"\n\
+if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{name}\" rd /s /q \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\{name}\"\n"
+            )
+        })
+        .collect();
+    commands.push_str(&shortcut_tray_cleanup_commands(names, include_current));
+    commands
+}
+
 pub fn copy_raw_cmd(src_raw: &str, _raw: &str, _path: &str) -> ResultType<String> {
     let main_raw = format!(
         "XCOPY \"{}\" \"{}\" /Y /E /H /C /I /K /R /Z",
@@ -1688,7 +1761,7 @@ pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> Res
     }
     let uninstall_str = get_uninstall(false, false)?;
     let mut path = path.trim_end_matches('\\').to_owned();
-    let (subkey, _path, start_menu, exe) = get_default_install_info();
+    let (subkey, _path, _, exe) = get_default_install_info();
     let mut exe = exe;
     if path.is_empty() {
         path = _path;
@@ -1709,6 +1782,9 @@ pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> Res
         version_build = versions[2];
     }
     let app_name = crate::get_app_name();
+    let shortcut_names = get_shortcut_names()?;
+    let display_name = shortcut_names.display.as_str();
+    let start_menu = shortcut_start_menu_path(display_name);
 
     let current_exe = std::env::current_exe()?;
     let cur_exe = current_exe
@@ -1733,16 +1809,20 @@ pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> Res
     let tmp_path = "%RUSTDESK_OUTPUT_DIR%".to_owned();
     let mk_shortcut_commands = embedded_shortcut_commands(
         shortcut_bytes(&exe, None, shortcut_icon_location.as_deref())?,
-        &format!("{app_name}.lnk"),
+        &format!("{display_name}.lnk"),
         "mk_shortcut",
     );
     let uninstall_shortcut_commands = embedded_shortcut_commands(
         shortcut_bytes(&exe, Some("--uninstall"), Some("msiexec.exe"))?,
-        &format!("Uninstall {app_name}.lnk"),
+        &format!("Uninstall {display_name}.lnk"),
         "uninstall_shortcut",
     );
     let tray_shortcut_commands =
-        embedded_tray_shortcut_commands(&app_name, &exe, shortcut_icon_location.as_deref())?;
+        embedded_tray_shortcut_commands(
+            display_name,
+            &exe,
+            shortcut_icon_location.as_deref(),
+        )?;
     let mut reg_value_desktop_shortcuts = "0".to_owned();
     let mut reg_value_start_menu_shortcuts = "0".to_owned();
     let mut reg_value_printer = "0".to_owned();
@@ -1751,7 +1831,7 @@ pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> Res
         shortcuts = format!(
             "copy /Y \"{}\\{}.lnk\" \"%PUBLIC%\\Desktop\\\"",
             tmp_path,
-            crate::get_app_name()
+            display_name
         );
         reg_value_desktop_shortcuts = "1".to_owned();
     }
@@ -1759,8 +1839,8 @@ pub fn install_me(options: &str, path: String, silent: bool, debug: bool) -> Res
         shortcuts = format!(
             "{shortcuts}
 md \"{start_menu}\"
-copy /Y \"{tmp_path}\\{app_name}.lnk\" \"{start_menu}\\\"
-copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{start_menu}\\\"
+copy /Y \"{tmp_path}\\{display_name}.lnk\" \"{start_menu}\\\"
+copy /Y \"{tmp_path}\\Uninstall {display_name}.lnk\" \"{start_menu}\\\"
      "
         );
         reg_value_start_menu_shortcuts = "1".to_owned();
@@ -1783,11 +1863,13 @@ copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{start_menu}\\\"
     // Note: without if exist, the bat may exit in advance on some Windows7 https://github.com/rustdesk/rustdesk/issues/895
     let dels = format!(
         "
-if exist \"{tmp_path}\\{app_name}.lnk\" del /f /q \"{tmp_path}\\{app_name}.lnk\"
-if exist \"{tmp_path}\\Uninstall {app_name}.lnk\" del /f /q \"{tmp_path}\\Uninstall {app_name}.lnk\"
-if exist \"{tmp_path}\\{app_name} Tray.lnk\" del /f /q \"{tmp_path}\\{app_name} Tray.lnk\"
-        "
+if exist \"{tmp_path}\\{display_name}.lnk\" del /f /q \"{tmp_path}\\{display_name}.lnk\"
+if exist \"{tmp_path}\\Uninstall {display_name}.lnk\" del /f /q \"{tmp_path}\\Uninstall {display_name}.lnk\"
+if exist \"{tmp_path}\\{display_name} Tray.lnk\" del /f /q \"{tmp_path}\\{display_name} Tray.lnk\"
+        ",
+        display_name = display_name
     );
+    let legacy_shortcuts = shortcut_cleanup_commands(&shortcut_names, false);
     let src_exe = cur_exe.clone();
 
     // potential bug here: if run_cmd cancelled, but config file is changed.
@@ -1802,7 +1884,7 @@ if exist \"{tmp_path}\\{app_name} Tray.lnk\" del /f /q \"{tmp_path}\\{app_name} 
     } else {
         format!("
 {tray_shortcut_commands}
-copy /Y \"{tmp_path}\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"
+copy /Y \"{tmp_path}\\{display_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"
 ")
     };
 
@@ -1825,6 +1907,7 @@ copy /Y \"{tmp_path}\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\
 chcp 65001
 md \"{path}\"
 {copy_exe}
+{legacy_shortcuts}
 reg add {subkey} /f
 reg add {subkey} /f /v DisplayIcon /t REG_SZ /d \"{display_icon}\"
 reg add {subkey} /f /v DisplayName /t REG_SZ /d \"{app_name}\"
@@ -1843,11 +1926,13 @@ reg add {subkey} /f /v WindowsInstaller /t REG_DWORD /d 0
 {uninstall_shortcut_commands}
 {tray_shortcuts}
 {shortcuts}
-copy /Y \"{tmp_path}\\Uninstall {app_name}.lnk\" \"{path}\\\"
+copy /Y \"{tmp_path}\\Uninstall {display_name}.lnk\" \"{path}\\\"
 {dels}
 {install_tail}
     ",
         display_icon = shortcut_icon_location.as_deref().unwrap_or(exe.as_str()),
+        display_name = display_name,
+        legacy_shortcuts = legacy_shortcuts,
         nested_exe = escape_nested_cmd_ampersands(&exe),
         version = crate::VERSION.replace("-", "."),
         build_date = crate::BUILD_DATE,
@@ -1919,7 +2004,7 @@ fn get_before_uninstall(kill_self: bool) -> String {
 /// is included in the generated uninstall script. If `uninstall_printer` is `false`, the printer
 /// related command is omitted from the script.
 fn get_uninstall(kill_self: bool, uninstall_printer: bool) -> ResultType<String> {
-    let (subkey, path, start_menu, _) = get_install_info();
+    let (subkey, path, _, _) = get_install_info();
     let installer_state = get_windows_installer_state(&subkey)?;
     if let Some(product_code) = get_msi_product_code(&subkey, installer_state)? {
         return Ok(build_msi_uninstall_command(&product_code));
@@ -1927,6 +2012,8 @@ fn get_uninstall(kill_self: bool, uninstall_printer: bool) -> ResultType<String>
     if installer_state == Some(true) {
         bail!("MSI product code was not found in {subkey}");
     }
+    let shortcut_names = get_shortcut_names()?;
+    let shortcut_cleanup = shortcut_cleanup_commands(&shortcut_names, true);
 
     let mut uninstall_cert_cmd = "".to_string();
     let mut uninstall_printer_cmd = "".to_string();
@@ -1946,13 +2033,11 @@ fn get_uninstall(kill_self: bool, uninstall_printer: bool) -> ResultType<String>
     reg delete {subkey} /f
     {uninstall_amyuni_idd}
     if exist \"{path}\" rd /s /q \"{path}\"
-    if exist \"{start_menu}\" rd /s /q \"{start_menu}\"
-    if exist \"%PUBLIC%\\Desktop\\{app_name}.lnk\" del /f /q \"%PUBLIC%\\Desktop\\{app_name}.lnk\"
-    if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name} Tray.lnk\" del /f /q \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name} Tray.lnk\"
+    {shortcut_cleanup}
     ",
         before_uninstall=get_before_uninstall(kill_self),
         uninstall_amyuni_idd=get_uninstall_amyuni_idd(),
-        app_name = crate::get_app_name(),
+        shortcut_cleanup = shortcut_cleanup,
     ))
 }
 
@@ -3382,17 +3467,26 @@ pub fn try_lock_tray_single_instance() -> bool {
 pub fn uninstall_service(show_new_window: bool, _: bool) -> bool {
     log::info!("Uninstalling service...");
     let filter = format!(" /FI \"PID ne {}\"", get_current_pid());
+    let shortcut_names = match get_shortcut_names() {
+        Ok(names) => names,
+        Err(err) => {
+            log::error!("Failed to prepare shortcut cleanup: {err}");
+            return true;
+        }
+    };
+    let shortcut_cleanup = shortcut_tray_cleanup_commands(&shortcut_names, true);
     Config::set_option("stop-service".into(), "Y".into());
     let cmds = format!(
         "
     chcp 65001
     sc stop {app_name}
     sc delete {app_name}
-    if exist \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name} Tray.lnk\" del /f /q \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\{app_name} Tray.lnk\"
+    {shortcut_cleanup}
     taskkill /F /IM {broker_exe}
     taskkill /F /IM {app_name}.exe{filter}
     ",
         app_name = crate::get_app_name(),
+        shortcut_cleanup = shortcut_cleanup,
         broker_exe = WIN_TOPMOST_INJECTED_PROCESS_EXE,
     );
     if let Err(err) = run_cmds(cmds, false, "uninstall") {
@@ -3406,6 +3500,9 @@ pub fn uninstall_service(show_new_window: bool, _: bool) -> bool {
 
 fn get_install_service_commands(path: &str, exe: &str) -> ResultType<String> {
     let app_name = crate::get_app_name();
+    let shortcut_names = get_shortcut_names()?;
+    let display_name = shortcut_names.display.as_str();
+    let legacy_shortcut_cleanup = shortcut_tray_cleanup_commands(&shortcut_names, false);
     for value in [path, exe] {
         validate_install_value(value)?;
     }
@@ -3420,19 +3517,22 @@ fn get_install_service_commands(path: &str, exe: &str) -> ResultType<String> {
         validate_install_value(icon)?;
     }
     let tray_shortcut_commands =
-        embedded_tray_shortcut_commands(&app_name, exe, shortcut_icon_location.as_deref())?;
+        embedded_tray_shortcut_commands(display_name, exe, shortcut_icon_location.as_deref())?;
     let filter = format!(" /FI \"PID ne {}\"", get_current_pid());
     Ok(format!(
         "
 chcp 65001
 taskkill /F /IM {app_name}.exe{filter}
+{legacy_shortcut_cleanup}
 {tray_shortcut_commands}
-copy /Y \"%RUSTDESK_OUTPUT_DIR%\\{app_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"
+copy /Y \"%RUSTDESK_OUTPUT_DIR%\\{display_name} Tray.lnk\" \"%PROGRAMDATA%\\Microsoft\\Windows\\Start Menu\\Programs\\Startup\\\"
 {import_config}
 {create_service}
     ",
         import_config = get_import_config(exe),
         create_service = get_create_service(exe),
+        display_name = display_name,
+        legacy_shortcut_cleanup = legacy_shortcut_cleanup,
     ))
 }
 
@@ -4847,6 +4947,15 @@ pub(super) fn get_pids_with_first_arg_by_wmic<S1: AsRef<str>, S2: AsRef<str>>(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn shortcut_names_separate_internal_name_from_display_name() {
+        let names = shortcut_names_for("RustDesk", "新育智慧校园远程协助").unwrap();
+
+        assert_eq!(names.internal, "RustDesk");
+        assert_eq!(names.display, "新育智慧校园远程协助");
+        assert_eq!(names.legacy, Some("RustDesk".to_owned()));
+    }
 
     #[test]
     fn service_control_state_remembers_stop_before_worker_attachment() {
