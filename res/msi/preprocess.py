@@ -11,11 +11,13 @@ import re
 import platform
 from pathlib import Path
 import shutil
-from xml.sax.saxutils import quoteattr
+from xml.sax.saxutils import escape, quoteattr
 
 g_indent_unit = "\t"
 g_version = ""
 g_build_date = datetime.datetime.now().strftime("%Y-%m-%d %H:%M")
+
+DISPLAY_NAME_PLACEHOLDER = "__MSI_DISPLAY_NAME__"
 
 # Replace the following links with your own in the custom arp properties.
 # https://learn.microsoft.com/en-us/windows/win32/msi/property-reference
@@ -82,6 +84,12 @@ def make_parser():
     )
     parser.add_argument(
         "--app-name", type=str, default="RustDesk", help="The app name."
+    )
+    parser.add_argument(
+        "--display-name",
+        type=str,
+        default=None,
+        help="The visible MSI name. Defaults to --app-name (the Product value).",
     )
     parser.add_argument(
         "-v", "--version", type=str, default="", help="The app version."
@@ -270,15 +278,34 @@ def gen_pre_vars(args, dist_dir):
     )
 
 
-def replace_app_name_in_langs(app_name):
-    langs_dir = Path(sys.argv[0]).parent.joinpath("Package/Language")
-    for file_path in langs_dir.glob("*.wxl"):
+def resolve_display_name(args):
+    return args.display_name if args.display_name is not None else args.app_name
+
+
+def replace_display_name_placeholder(content, display_name):
+    escaped_display_name = escape(
+        str(display_name), {"\"": "&quot;", "'": "&apos;"}
+    )
+    return content.replace(DISPLAY_NAME_PLACEHOLDER, escaped_display_name)
+
+
+def replace_display_name_in_templates(display_name):
+    msi_dir = Path(sys.argv[0]).parent
+    relative_paths = [
+        "Package/Components/Folders.wxs",
+        "Package/Components/RustDesk.wxs",
+        *(
+            str(path.relative_to(msi_dir)).replace("\\", "/")
+            for path in (msi_dir / "Package/Language").glob("*.wxl")
+        ),
+    ]
+    for relative_path in relative_paths:
+        file_path = msi_dir.joinpath(relative_path)
         with open(file_path, "r", encoding="utf-8") as f:
-            lines = f.readlines()
-        for i, line in enumerate(lines):
-            lines[i] = line.replace("RustDesk", app_name)
+            content = f.read()
+        content = replace_display_name_placeholder(content, display_name)
         with open(file_path, "w", encoding="utf-8") as f:
-            f.writelines(lines)
+            f.write(content)
 
 def gen_upgrade_info():
     def func(lines, index_start):
@@ -568,4 +595,4 @@ if __name__ == "__main__":
     if not gen_custom_dialog_bitmaps():
         sys.exit(-1)
 
-    replace_app_name_in_langs(args.app_name)
+    replace_display_name_in_templates(resolve_display_name(args))
