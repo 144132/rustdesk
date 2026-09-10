@@ -282,6 +282,17 @@ def resolve_display_name(args):
     return args.display_name if args.display_name is not None else args.app_name
 
 
+def replace_app_name_in_langs(app_name):
+    langs_dir = Path(sys.argv[0]).parent.joinpath("Package/Language")
+    for file_path in langs_dir.glob("*.wxl"):
+        with open(file_path, "r", encoding="utf-8") as f:
+            lines = f.readlines()
+        for i, line in enumerate(lines):
+            lines[i] = line.replace("RustDesk", app_name)
+        with open(file_path, "w", encoding="utf-8") as f:
+            f.writelines(lines)
+
+
 def replace_display_name_placeholder(content, display_name):
     escaped_display_name = escape(
         str(display_name), {"\"": "&quot;", "'": "&apos;"}
@@ -595,4 +606,5 @@ if __name__ == "__main__":
     if not gen_custom_dialog_bitmaps():
         sys.exit(-1)
 
+    replace_app_name_in_langs(args.app_name)
     replace_display_name_in_templates(resolve_display_name(args))

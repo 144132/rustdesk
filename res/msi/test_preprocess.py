@@ -2,6 +2,7 @@
 # -*- coding: utf-8 -*-
 
 import importlib.util
+import sys
 from pathlib import Path
 
 
@@ -24,6 +25,26 @@ def test_display_name_placeholder_escapes_xml_attribute_text():
     )
 
     assert result == 'Value="A&amp;B &lt;client&gt; &quot;quoted&quot;"'
+
+
+def test_app_name_replacement_remains_for_non_display_wxl_text(tmp_path, monkeypatch):
+    preprocess = load_preprocess()
+    msi_dir = tmp_path / "msi"
+    language_dir = msi_dir / "Package" / "Language"
+    language_dir.mkdir(parents=True)
+    language_file = language_dir / "Package.en-us.wxl"
+    language_file.write_text(
+        '<String Id="F_App" Value="RustDesk" />\n'
+        '<String Id="SC_Client" Value="__MSI_DISPLAY_NAME__" />\n',
+        encoding="utf-8",
+    )
+    monkeypatch.setattr(sys, "argv", [str(msi_dir / "preprocess.py")])
+
+    preprocess.replace_app_name_in_langs("AcmeDesk")
+
+    result = language_file.read_text(encoding="utf-8")
+    assert 'Value="AcmeDesk"' in result
+    assert "__MSI_DISPLAY_NAME__" in result
 
 
 def test_display_name_defaults_to_app_name():
@@ -51,4 +72,3 @@ def test_workflow_passes_separate_display_names_for_package_and_template():
 
     assert 'python preprocess.py --arp -d ../../rustdesk --display-name "新育智慧校园远程协助"' in workflow
     assert "python preprocess.py --arp --template --revision-version 0 -d ../../rustdesk-msi-template --app-name RDAPPNAM --display-name RDAPPNAM" in workflow
-
