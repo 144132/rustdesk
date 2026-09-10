@@ -48,6 +48,7 @@ pub enum RemoteSoftwareError {
 const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
 const SELF_HEAL_INTERVAL: Duration = Duration::from_secs(5 * 60);
 const ATTEMPT_WINDOW_SECONDS: u64 = 60 * 60;
+const WORKER_STOP_JOIN_TIMEOUT: Duration = Duration::from_secs(1);
 
 #[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
 pub struct RecoveryState {
@@ -255,10 +256,100 @@ fn validate_recovery_entry(
     Ok(())
 }
 
+fn validate_detection(rule: &DetectionRule) -> Result<(), RemoteSoftwareError> {
+    validate_manifest(&RemoteSoftwareManifest {
+        request_id: "detection".into(),
+        software_name: "detection".into(),
+        package_url: "https://szxinyu.com/detection.exe".into(),
+        sha256: "00".repeat(32),
+        installer_type: InstallerType::Exe,
+        detection_rule: rule.clone(),
+        silent_args: Vec::new(),
+        mode: InstallMode::DownloadOnly,
+    })?;
+    if let DetectionRule::MsiProductCode(code) = rule {
+        let bytes = code.as_bytes();
+        if bytes.len() != 38
+            || bytes[0] != b'{'
+            || bytes[37] != b'}'
+            || bytes[1..37].iter().enumerate().any(|(index, byte)| {
+                if [8, 13, 18, 23].contains(&index) {
+                    *byte != b'-'
+                } else {
+                    !byte.is_ascii_hexdigit()
+                }
+            })
+        {
+            return Err(RemoteSoftwareError::InvalidManifest("invalid MSI ProductCode"));
+        }
+    }
+    Ok(())
+}
+
 #[derive(Default)]
 struct WorkerStop {
     stopped: Mutex<bool>,
     wake: Condvar,
+}
+
+#[cfg(any(windows, test))]
+#[derive(Default)]
+struct WorkerCompletion {
+    finished: Mutex<bool>,
+    wake: Condvar,
+}
+
+#[cfg(any(windows, test))]
+impl WorkerCompletion {
+    fn finish(&self) {
+        if let Ok(mut finished) = self.finished.lock() {
+            *finished = true;
+            self.wake.notify_all();
+        }
+    }
+
+    fn wait(&self, duration: Duration) -> bool {
+        let finished = match self.finished.lock() {
+            Ok(finished) => finished,
+            Err(_) => return true,
+        };
+        if *finished {
+            return true;
+        }
+        self.wake
+            .wait_timeout_while(finished, duration, |finished| !*finished)
+            .map(|(finished, _)| *finished)
+            .unwrap_or(true)
+    }
+}
+
+#[cfg(any(windows, test))]
+struct WorkerCompletionGuard {
+    completion: Arc<WorkerCompletion>,
+}
+
+#[cfg(any(windows, test))]
+impl Drop for WorkerCompletionGuard {
+    fn drop(&mut self) {
+        self.completion.finish();
+    }
+}
+
+#[cfg(any(windows, test))]
+fn stop_worker_thread(
+    stop: &WorkerStop,
+    completion: &WorkerCompletion,
+    thread: Option<std::thread::JoinHandle<()>>,
+    timeout: Duration,
+) {
+    stop.stop();
+    if let Some(thread) = thread {
+        if completion.wait(timeout) {
+            let _ = thread.join();
+        }
+        // A still-running thread owns only its stop/completion Arcs, so dropping
+        // the JoinHandle detaches it without blocking the service control thread.
+    }
 }
 
 impl WorkerStop {
@@ -417,7 +508,10 @@ where
     let count = state.entries.len();
     state
         .entries
-        .retain(|entry| validate_recovery_entry(&package_root, entry).is_ok());
+        .retain(|entry| {
+            validate_recovery_entry(&package_root, entry).is_ok()
+                && validate_detection(&entry.manifest.detection_rule).is_ok()
+        });
     if state.entries.len() != count {
         store.save(state)?;
     }
@@ -558,30 +652,33 @@ impl Drop for WorkerRunningGuard {
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 pub struct SelfHealWorkerHandle {
     stop: Arc<WorkerStop>,
+    completion: Arc<WorkerCompletion>,
     thread: Option<std::thread::JoinHandle<()>>,
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl SelfHealWorkerHandle {
     pub fn stop(&mut self) {
-        self.stop_inner();
+        self.stop_inner(WORKER_STOP_JOIN_TIMEOUT);
     }
 
-    fn stop_inner(&mut self) {
-        self.stop.stop();
-        if let Some(thread) = self.thread.take() {
-            let _ = thread.join();
-        }
+    fn stop_inner(&mut self, timeout: Duration) {
+        stop_worker_thread(
+            &self.stop,
+            &self.completion,
+            self.thread.take(),
+            timeout,
+        );
     }
 }
 
-#[cfg(windows)]
+#[cfg(any(windows, test))]
 impl Drop for SelfHealWorkerHandle {
     fn drop(&mut self) {
-        self.stop_inner();
+        self.stop_inner(WORKER_STOP_JOIN_TIMEOUT);
     }
 }
 
@@ -616,9 +713,14 @@ pub fn start_self_heal_worker() -> Result<Option<SelfHealWorkerHandle>, RemoteSo
     };
     let stop = Arc::new(WorkerStop::default());
     let worker_stop = stop.clone();
+    let completion = Arc::new(WorkerCompletion::default());
+    let worker_completion = completion.clone();
     let thread = match std::thread::Builder::new()
         .name("remote-software-self-heal".into())
         .spawn(move || {
+            let _completion = WorkerCompletionGuard {
+                completion: worker_completion,
+            };
             let _running = WorkerRunningGuard;
             let runtime = match hbb_common::tokio::runtime::Builder::new_current_thread()
                 .enable_all()
@@ -664,6 +766,7 @@ pub fn start_self_heal_worker() -> Result<Option<SelfHealWorkerHandle>, RemoteSo
     };
     Ok(Some(SelfHealWorkerHandle {
         stop,
+        completion,
         thread: Some(thread),
     }))
 }
@@ -1045,33 +1148,8 @@ mod native {
         .map_err(|_| RemoteSoftwareError::State)
     }
 
-    fn validate_detection(rule: &DetectionRule) -> Result<(), RemoteSoftwareError> {
-        // Task 1 keeps its path validator private; use its public manifest boundary.
-        validate_manifest(&RemoteSoftwareManifest {
-            request_id: "detection".into(),
-            software_name: "detection".into(),
-            package_url: "https://szxinyu.com/detection.exe".into(),
-            sha256: "00".repeat(32),
-            installer_type: InstallerType::Exe,
-            detection_rule: rule.clone(),
-            silent_args: Vec::new(),
-            mode: InstallMode::DownloadOnly,
-        })?;
-        if let DetectionRule::MsiProductCode(code) = rule {
-            let bytes = code.as_bytes();
-            if bytes.len() != 38 || bytes[0] != b'{' || bytes[37] != b'}'
-                || bytes[1..37].iter().enumerate().any(|(index, byte)| {
-                    if [8, 13, 18, 23].contains(&index) { *byte != b'-' } else { !byte.is_ascii_hexdigit() }
-                })
-            {
-                return Err(RemoteSoftwareError::InvalidManifest("invalid MSI ProductCode"));
-            }
-        }
-        Ok(())
-    }
-
     pub fn detect_installed(rule: &DetectionRule) -> Result<bool, RemoteSoftwareError> {
-        validate_detection(rule)?;
+        super::validate_detection(rule)?;
         if let DetectionRule::ExePath(path) = rule {
             return Ok(Path::new(path).is_file());
         }
@@ -1284,7 +1362,7 @@ mod native {
         manifest: &RemoteSoftwareManifest,
         progress: &impl Fn(RemoteSoftwareStage, Option<u8>),
     ) -> Result<(RemoteSoftwareStage, Option<i32>), RemoteSoftwareError> {
-        validate_detection(&manifest.detection_rule)?;
+        super::validate_detection(&manifest.detection_rule)?;
         run_with(
             manifest,
             progress,
@@ -1464,6 +1542,9 @@ mod tests {
     use std::io::{self, Cursor, Read};
     use std::path::{Path, PathBuf};
     use std::rc::Rc;
+    use std::sync::atomic::{AtomicUsize, Ordering};
+    use std::sync::{Arc, Condvar, Mutex};
+    use std::time::Instant;
 
     fn test_msi_manifest() -> RemoteSoftwareManifest {
         RemoteSoftwareManifest {
@@ -2272,6 +2353,74 @@ mod tests {
         .unwrap();
         assert!(store.state.entries.is_empty());
         assert_eq!(store.saved.borrow().last().unwrap().entries.len(), 0);
+    }
+
+    #[test]
+    fn invalid_detection_rule_is_removed_before_detector_or_executor() {
+        let mut store = test_worker_store("worker-invalid-detection-rule");
+        store.state.entries[0].manifest.detection_rule =
+            DetectionRule::MsiProductCode("not-a-product-code".into());
+        run_worker_loop(
+            &mut store,
+            &WorkerStop::default(),
+            || 1_789_000_000,
+            |_, _| false,
+            |_| panic!("invalid detection rule must not reach detector"),
+            |_| panic!("invalid detection rule must not reach executor"),
+        )
+        .unwrap();
+        assert!(store.state.entries.is_empty());
+        assert_eq!(store.saved.borrow().last().unwrap().entries.len(), 0);
+    }
+
+    #[test]
+    fn bounded_stop_does_not_join_blocked_executor_or_start_next_attempt() {
+        let stop = Arc::new(WorkerStop::default());
+        let completion = Arc::new(WorkerCompletion::default());
+        let started = Arc::new((Mutex::new(false), Condvar::new()));
+        let release = Arc::new((Mutex::new(false), Condvar::new()));
+        let attempts = Arc::new(AtomicUsize::new(0));
+        let worker_stop = stop.clone();
+        let worker_completion = completion.clone();
+        let worker_started = started.clone();
+        let worker_release = release.clone();
+        let worker_attempts = attempts.clone();
+        let thread = std::thread::spawn(move || {
+            let _completion = WorkerCompletionGuard {
+                completion: worker_completion,
+            };
+            worker_attempts.fetch_add(1, Ordering::SeqCst);
+            let (ready, wake) = &*worker_started;
+            *ready.lock().unwrap() = true;
+            wake.notify_all();
+            let (released, wake) = &*worker_release;
+            let mut released = released.lock().unwrap();
+            while !*released {
+                released = wake.wait(released).unwrap();
+            }
+            if !worker_stop.is_stopped() {
+                worker_attempts.fetch_add(1, Ordering::SeqCst);
+            }
+        });
+        let mut handle = SelfHealWorkerHandle {
+            stop,
+            completion: completion.clone(),
+            thread: Some(thread),
+        };
+        let (ready, wake) = &*started;
+        let mut ready = ready.lock().unwrap();
+        while !*ready {
+            ready = wake.wait(ready).unwrap();
+        }
+        drop(ready);
+        let started_at = Instant::now();
+        handle.stop_inner(Duration::from_millis(20));
+        assert!(started_at.elapsed() < Duration::from_millis(500));
+        assert_eq!(attempts.load(Ordering::SeqCst), 1);
+        let (released, wake) = &*release;
+        *released.lock().unwrap() = true;
+        wake.notify_all();
+        assert!(completion.wait(Duration::from_secs(1)));
     }
 
     #[test]
