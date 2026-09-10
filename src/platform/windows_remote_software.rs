@@ -2,8 +2,10 @@
 use crate::remote_software::{
     installer_outcome, validate_manifest, validate_package_url, validate_sha256, InstallOutcome,
     DetectionRule, InstallMode, InstallerType, RemoteSoftwareManifest, RemoteSoftwareStage,
+    RemoteSoftwareStatus,
 };
 use hbb_common::thiserror;
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha256};
 use std::{
     fs::{self, File, OpenOptions},
@@ -33,9 +35,155 @@ pub enum RemoteSoftwareError {
     Installer,
     #[error("installer_busy")]
     Busy,
+    #[error("state_failed")]
+    State,
 }
 
 const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+#[derive(Clone, Debug, Default, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RecoveryState {
+    pub entries: Vec<RecoveryEntry>,
+}
+
+#[derive(Clone, Debug, Deserialize, PartialEq, Eq, Serialize)]
+pub struct RecoveryEntry {
+    pub manifest: RemoteSoftwareManifest,
+    pub verified_package_path: PathBuf,
+    pub last_result: Option<RemoteSoftwareStatus>,
+    pub attempt_timestamps: Vec<u64>,
+    pub failure_count: u32,
+    pub paused: bool,
+}
+
+#[derive(Clone, Debug)]
+pub struct StateStore {
+    root: PathBuf,
+}
+
+struct TemporaryStateFile {
+    file: Option<File>,
+    path: PathBuf,
+}
+
+impl Drop for TemporaryStateFile {
+    fn drop(&mut self) {
+        drop(self.file.take());
+        let _ = fs::remove_file(&self.path);
+    }
+}
+
+impl StateStore {
+    pub fn with_root(root: PathBuf) -> Self {
+        Self { root }
+    }
+
+    #[cfg(windows)]
+    pub fn production() -> Result<Self, RemoteSoftwareError> {
+        Ok(Self::with_root(native::prepare_state_root()?))
+    }
+
+    pub fn state_path(&self) -> PathBuf {
+        self.root.join("state.json")
+    }
+
+    pub fn package_root(&self) -> PathBuf {
+        self.root.join("packages")
+    }
+
+    pub fn load(&self) -> Result<RecoveryState, RemoteSoftwareError> {
+        let bytes = match fs::read(self.state_path()) {
+            Ok(bytes) => bytes,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => {
+                return Ok(RecoveryState::default());
+            }
+            Err(_) => return Err(RemoteSoftwareError::State),
+        };
+        let mut state: RecoveryState = match serde_json::from_slice(&bytes) {
+            Ok(state) => state,
+            Err(_) => return Ok(RecoveryState::default()),
+        };
+        state.entries.retain(|entry| self.validate_entry(entry).is_ok());
+        Ok(state)
+    }
+
+    pub fn save(&self, state: &RecoveryState) -> Result<(), RemoteSoftwareError> {
+        for entry in &state.entries {
+            self.validate_entry(entry)?;
+        }
+        let temporary_path = self.root.join(format!(
+            ".state.json.{}.tmp",
+            uuid::Uuid::new_v4()
+        ));
+        let file = OpenOptions::new()
+            .write(true)
+            .create_new(true)
+            .open(&temporary_path)
+            .map_err(|_| RemoteSoftwareError::State)?;
+        let mut temporary = TemporaryStateFile {
+            file: Some(file),
+            path: temporary_path,
+        };
+        let file = temporary.file.as_mut().ok_or(RemoteSoftwareError::State)?;
+        serde_json::to_writer_pretty(&mut *file, state).map_err(|_| RemoteSoftwareError::State)?;
+        file.flush().map_err(|_| RemoteSoftwareError::State)?;
+        file.sync_all().map_err(|_| RemoteSoftwareError::State)?;
+        drop(temporary.file.take());
+        atomic_replace(&temporary.path, &self.state_path())?;
+        Ok(())
+    }
+
+    pub fn remove_stale_part_files(&self) -> Result<(), RemoteSoftwareError> {
+        let package_root = self.package_root();
+        let metadata = match fs::symlink_metadata(&package_root) {
+            Ok(metadata) => metadata,
+            Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(()),
+            Err(_) => return Err(RemoteSoftwareError::State),
+        };
+        reject_reparse(&metadata)?;
+        if !metadata.is_dir() {
+            return Err(RemoteSoftwareError::State);
+        }
+        let entries = match fs::read_dir(&package_root) {
+            Ok(entries) => entries,
+            Err(_) => return Err(RemoteSoftwareError::State),
+        };
+        for entry in entries {
+            let entry = entry.map_err(|_| RemoteSoftwareError::State)?;
+            if !entry
+                .file_name()
+                .to_str()
+                .is_some_and(|name| name.ends_with(".part"))
+            {
+                continue;
+            }
+            let metadata = fs::symlink_metadata(entry.path()).map_err(|_| RemoteSoftwareError::State)?;
+            if metadata.is_file() && !metadata.file_type().is_symlink() {
+                fs::remove_file(entry.path()).map_err(|_| RemoteSoftwareError::State)?;
+            }
+        }
+        Ok(())
+    }
+
+    fn validate_entry(&self, entry: &RecoveryEntry) -> Result<(), RemoteSoftwareError> {
+        validate_manifest(&entry.manifest)?;
+        let (_, expected) = cache_paths(&self.package_root(), &entry.manifest)?;
+        if entry.verified_package_path != expected {
+            return Err(RemoteSoftwareError::State);
+        }
+        Ok(())
+    }
+}
+
+#[cfg(not(windows))]
+fn atomic_replace(source: &Path, destination: &Path) -> Result<(), RemoteSoftwareError> {
+    fs::rename(source, destination).map_err(|_| RemoteSoftwareError::State)
+}
+
+#[cfg(windows)]
+fn atomic_replace(source: &Path, destination: &Path) -> Result<(), RemoteSoftwareError> {
+    native::atomic_replace(source, destination)
+}
 
 // The Windows entry point supplies the OS operations; this owns all launch/skip decisions.
 // Prepared resources (including cache locks) stay alive until the launch closure returns.
@@ -360,7 +508,10 @@ mod native {
                 DACL_SECURITY_INFORMATION, OWNER_SECURITY_INFORMATION, PROTECTED_DACL_SECURITY_INFORMATION,
                 PSECURITY_DESCRIPTOR, PSID, SECURITY_ATTRIBUTES,
             },
-            Storage::FileSystem::CreateDirectoryW,
+            Storage::FileSystem::{
+                CreateDirectoryW, MoveFileExW, MOVEFILE_REPLACE_EXISTING,
+                MOVEFILE_WRITE_THROUGH,
+            },
             System::{Com::CoTaskMemFree, SystemInformation::GetSystemDirectoryW},
             UI::Shell::{FOLDERID_ProgramData, SHGetKnownFolderPath, KF_FLAG_DEFAULT},
         },
@@ -379,6 +530,26 @@ mod native {
 
     pub fn service_is_available() -> bool {
         super::super::windows::is_self_service_running()
+    }
+
+    pub(super) fn atomic_replace(
+        source: &Path,
+        destination: &Path,
+    ) -> Result<(), RemoteSoftwareError> {
+        let source: Vec<u16> = source.as_os_str().encode_wide().chain(Some(0)).collect();
+        let destination: Vec<u16> = destination
+            .as_os_str()
+            .encode_wide()
+            .chain(Some(0))
+            .collect();
+        unsafe {
+            MoveFileExW(
+                PCWSTR(source.as_ptr()),
+                PCWSTR(destination.as_ptr()),
+                MOVEFILE_REPLACE_EXISTING | MOVEFILE_WRITE_THROUGH,
+            )
+        }
+        .map_err(|_| RemoteSoftwareError::State)
     }
 
     fn validate_detection(rule: &DetectionRule) -> Result<(), RemoteSoftwareError> {
@@ -581,6 +752,15 @@ mod native {
         Ok(CacheDirectory { path, _handles: handles })
     }
 
+    pub(super) fn prepare_state_root() -> Result<PathBuf, RemoteSoftwareError> {
+        let directory = prepare_cache()?;
+        directory
+            .path
+            .parent()
+            .map(Path::to_path_buf)
+            .ok_or(RemoteSoftwareError::State)
+    }
+
     fn download(
         manifest: &RemoteSoftwareManifest,
         part: &Path,
@@ -753,7 +933,9 @@ mod native {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::remote_software::{DetectionRule, InstallMode, InstallerType};
+    use crate::remote_software::{
+        DetectionRule, InstallMode, InstallerType, RemoteSoftwareStatus,
+    };
     use std::io::{self, Cursor, Read};
     use std::path::{Path, PathBuf};
 
@@ -1135,5 +1317,133 @@ mod tests {
             || { reject_reparse_attributes(0x410)?; Ok(()) },
             |_| panic!("unsafe cache must not launch"),
         ).is_err());
+    }
+
+    fn test_state_entry(root: &Path) -> RecoveryEntry {
+        let manifest = test_msi_manifest();
+        RecoveryEntry {
+            verified_package_path: root.join("packages").join(
+                "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.msi",
+            ),
+            last_result: Some(RemoteSoftwareStatus {
+                request_id: manifest.request_id.clone(),
+                stage: RemoteSoftwareStage::Failed,
+                message: "installer_failed".into(),
+                exit_code: Some(1603),
+                needs_reboot: false,
+                progress_percent: None,
+            }),
+            attempt_timestamps: vec![1_789_000_000, 1_789_000_300],
+            failure_count: 2,
+            paused: true,
+            manifest,
+        }
+    }
+
+    fn test_state_store(label: &str) -> (PathBuf, StateStore) {
+        let root = unique_test_path(label, "dir");
+        fs::create_dir_all(root.join("packages")).unwrap();
+        let store = StateStore::with_root(root.clone());
+        (root, store)
+    }
+
+    #[test]
+    fn recovery_state_round_trips_complete_metadata() {
+        let (root, store) = test_state_store("state-round-trip");
+        let expected = RecoveryState {
+            entries: vec![test_state_entry(&root)],
+        };
+        store.save(&expected).unwrap();
+        assert_eq!(store.load().unwrap(), expected);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn recovery_state_load_discards_malformed_and_untrusted_entries() {
+        let (root, store) = test_state_store("state-validation");
+        fs::write(store.state_path(), b"{interrupted").unwrap();
+        assert!(store.load().unwrap().entries.is_empty());
+
+        let valid = test_state_entry(&root);
+        let mut invalid_manifest = valid.clone();
+        invalid_manifest.manifest.package_url = "https://evil.example/app.msi".into();
+        let mut outside_cache = valid.clone();
+        outside_cache.verified_package_path = root.join("outside.msi");
+        let mut unsupported_name = valid.clone();
+        unsupported_name.verified_package_path = root.join("packages").join("setup.zip");
+        let persisted = RecoveryState {
+            entries: vec![valid.clone(), invalid_manifest, outside_cache, unsupported_name],
+        };
+        fs::write(store.state_path(), serde_json::to_vec(&persisted).unwrap()).unwrap();
+        assert_eq!(store.load().unwrap().entries, vec![valid]);
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn state_save_atomically_replaces_old_file_without_temporary_residue() {
+        let (root, store) = test_state_store("state-atomic-replace");
+        let first = RecoveryState {
+            entries: vec![test_state_entry(&root)],
+        };
+        store.save(&first).unwrap();
+        let mut replacement_entry = test_state_entry(&root);
+        replacement_entry.failure_count = 0;
+        replacement_entry.paused = false;
+        let replacement = RecoveryState {
+            entries: vec![replacement_entry],
+        };
+        store.save(&replacement).unwrap();
+        assert_eq!(store.load().unwrap(), replacement);
+        let names = fs::read_dir(&root)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().into_owned())
+            .collect::<Vec<_>>();
+        assert_eq!(names.iter().filter(|name| name.ends_with(".tmp")).count(), 0);
+        assert!(names.iter().any(|name| name == "state.json"));
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn stale_partial_cleanup_is_direct_and_cache_scoped() {
+        let (root, store) = test_state_store("state-part-cleanup");
+        let packages = root.join("packages");
+        let stale = packages.join("download.part");
+        let verified = packages.join(
+            "ba7816bf8f01cfea414140de5dae2223b00361a396177a9cb410ff61f20015ad.msi",
+        );
+        let unrelated = packages.join("keep.txt");
+        let nested = packages.join("nested");
+        let nested_part = nested.join("keep.part");
+        let outside_part = root.join("outside.part");
+        fs::create_dir(&nested).unwrap();
+        for path in [&stale, &verified, &unrelated, &nested_part, &outside_part] {
+            fs::write(path, b"keep-or-remove").unwrap();
+        }
+        store.remove_stale_part_files().unwrap();
+        assert!(!stale.exists());
+        for path in [&verified, &unrelated, &nested_part, &outside_part] {
+            assert!(path.exists(), "cleanup escaped its direct .part scope: {path:?}");
+        }
+        fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn invalid_state_is_inert_and_preserves_verified_package() {
+        let (root, store) = test_state_store("state-inert-load");
+        let verified = test_state_entry(&root).verified_package_path;
+        fs::write(&verified, b"verified-package").unwrap();
+        let mut invalid = test_state_entry(&root);
+        invalid.manifest.sha256 = "not-a-digest".into();
+        fs::write(
+            store.state_path(),
+            serde_json::to_vec(&RecoveryState {
+                entries: vec![invalid],
+            })
+            .unwrap(),
+        )
+        .unwrap();
+        assert!(store.load().unwrap().entries.is_empty());
+        assert_eq!(fs::read(&verified).unwrap(), b"verified-package");
+        fs::remove_dir_all(root).unwrap();
     }
 }
