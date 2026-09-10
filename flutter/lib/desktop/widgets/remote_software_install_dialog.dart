@@ -1,3 +1,5 @@
+import 'dart:math';
+
 import 'package:flutter/material.dart';
 
 enum InstallerType { msi, exe }
@@ -7,6 +9,7 @@ enum DetectionType { msiProductCode, uninstallDisplayName, exePath }
 enum InstallMode { downloadOnly, downloadAndInstall }
 
 class RemoteSoftwareInstallForm {
+  final String requestId;
   String softwareName;
   String packageUrl;
   String sha256;
@@ -17,6 +20,7 @@ class RemoteSoftwareInstallForm {
   InstallMode mode;
 
   RemoteSoftwareInstallForm({
+    String? requestId,
     this.softwareName = '',
     this.packageUrl = '',
     this.sha256 = '',
@@ -25,7 +29,8 @@ class RemoteSoftwareInstallForm {
     this.detectionValue = '',
     List<String>? silentArgs,
     this.mode = InstallMode.downloadOnly,
-  }) : silentArgs = List<String>.from(silentArgs ?? const <String>[]);
+  })  : requestId = _nonEmptyRequestId(requestId),
+        silentArgs = List<String>.from(silentArgs ?? const <String>[]);
 
   /// Client-side feedback only; the FFI/Rust layer must validate again.
   Map<String, String> validate() {
@@ -51,6 +56,7 @@ class RemoteSoftwareInstallForm {
       // The control-character error is more specific than URL parsing errors.
     } else if (packageUri == null ||
         packageUri.scheme.toLowerCase() != 'https' ||
+        !_hasAllowedPort(packageUri) ||
         !_isAllowedPackageHost(packageUri.host) ||
         packageUri.userInfo.isNotEmpty) {
       errors['packageUrl'] = '安装包地址必须是 szxinyu.com 的 HTTPS 地址';
@@ -59,7 +65,7 @@ class RemoteSoftwareInstallForm {
     }
 
     if (!errors.containsKey('sha256') &&
-        !RegExp(r'^[a-fA-F0-9]{64}$').hasMatch(sha256.trim())) {
+        !RegExp(r'^[a-fA-F0-9]{64}$').hasMatch(sha256)) {
       errors['sha256'] = 'SHA-256 必须是 64 位十六进制字符串';
     }
 
@@ -87,17 +93,37 @@ class RemoteSoftwareInstallForm {
 
   Map<String, dynamic> toJson({String? requestId}) {
     final manifest = <String, dynamic>{
+      'request_id': _nonEmptyRequestId(requestId, fallback: this.requestId),
       'software_name': softwareName,
       'package_url': packageUrl,
       'sha256': sha256,
       'installer_type': _installerTypeToJson(installerType),
-      'detection_type': _detectionTypeToJson(detectionType),
-      'detection_value': detectionValue,
+      'detection_rule': _detectionRuleToJson(detectionType, detectionValue),
       'silent_args': List<String>.from(silentArgs),
       'mode': _installModeToJson(mode),
     };
-    if (requestId != null) manifest['request_id'] = requestId;
     return manifest;
+  }
+
+  static String _nonEmptyRequestId(String? value, {String? fallback}) {
+    final candidate = value?.trim().isNotEmpty == true
+        ? value!.trim()
+        : fallback?.trim();
+    if (candidate != null && candidate.isNotEmpty) return candidate;
+    return _generateRequestId();
+  }
+
+  static String _generateRequestId() {
+    final random = Random.secure();
+    final bytes = List<int>.generate(16, (_) => random.nextInt(256));
+    bytes[6] = (bytes[6] & 0x0f) | 0x40;
+    bytes[8] = (bytes[8] & 0x3f) | 0x80;
+    final hex = bytes
+        .map((byte) => byte.toRadixString(16).padLeft(2, '0'))
+        .join();
+    return '${hex.substring(0, 8)}-${hex.substring(8, 12)}-'
+        '${hex.substring(12, 16)}-${hex.substring(16, 20)}-'
+        '${hex.substring(20)}';
   }
 
   static void _addControlCharacterError(
@@ -132,9 +158,22 @@ class RemoteSoftwareInstallForm {
     );
   }
 
+  static bool _hasAllowedPort(Uri uri) {
+    final authority = uri.authority;
+    final hostPort = authority.substring(authority.lastIndexOf('@') + 1);
+    if (hostPort.lastIndexOf(':') < 0) return true;
+    return uri.port == 443;
+  }
+
   static bool _hasExpectedExtension(String path, InstallerType type) {
-    final extension = type == InstallerType.msi ? '.msi' : '.exe';
-    return path.toLowerCase().endsWith(extension);
+    if (path.isEmpty || path.endsWith('/')) return false;
+    final fileName = path.substring(path.lastIndexOf('/') + 1);
+    if (fileName.isEmpty || fileName.startsWith('.')) return false;
+    final dot = fileName.lastIndexOf('.');
+    if (dot <= 0 || dot == fileName.length - 1) return false;
+    final extension = fileName.substring(dot + 1).toLowerCase();
+    final expected = type == InstallerType.msi ? 'msi' : 'exe';
+    return extension == expected;
   }
 
   static bool _isMsiProductCode(String value) {
@@ -182,14 +221,17 @@ class RemoteSoftwareInstallForm {
     }
   }
 
-  static String _detectionTypeToJson(DetectionType type) {
+  static Map<String, String> _detectionRuleToJson(
+    DetectionType type,
+    String value,
+  ) {
     switch (type) {
       case DetectionType.msiProductCode:
-        return 'msi_product_code';
+        return <String, String>{'msi_product_code': value};
       case DetectionType.uninstallDisplayName:
-        return 'uninstall_display_name';
+        return <String, String>{'uninstall_display_name': value};
       case DetectionType.exePath:
-        return 'exe_path';
+        return <String, String>{'exe_path': value};
     }
   }
 

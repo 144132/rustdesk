@@ -3,6 +3,7 @@ import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/desktop/widgets/remote_software_install_dialog.dart';
 
 RemoteSoftwareInstallForm _validForm({
+  String? requestId,
   InstallerType installerType = InstallerType.exe,
   DetectionType detectionType = DetectionType.exePath,
   String? packageUrl,
@@ -10,6 +11,7 @@ RemoteSoftwareInstallForm _validForm({
   List<String>? silentArgs,
 }) {
   return RemoteSoftwareInstallForm(
+    requestId: requestId,
     softwareName: 'RustDesk',
     packageUrl: packageUrl ?? 'https://szxinyu.com/download/RustDesk.exe',
     sha256: 'a' * 64,
@@ -52,6 +54,25 @@ void main() {
         detectionValue: '{12345678-1234-1234-1234-1234567890AB}',
         silentArgs: <String>[],
       ).validate(),
+      contains('packageUrl'),
+    );
+  });
+
+  test('matches Rust port and final filename rules', () {
+    expect(
+      _validForm(packageUrl: 'https://szxinyu.com:443/RustDesk.exe').validate(),
+      isEmpty,
+    );
+    expect(
+      _validForm(packageUrl: 'https://szxinyu.com:8443/RustDesk.exe').validate(),
+      contains('packageUrl'),
+    );
+    expect(
+      _validForm(packageUrl: 'https://szxinyu.com/.exe').validate(),
+      contains('packageUrl'),
+    );
+    expect(
+      _validForm(packageUrl: 'https://szxinyu.com/').validate(),
       contains('packageUrl'),
     );
   });
@@ -119,22 +140,30 @@ void main() {
   });
 
   test('serializes the structured snake_case manifest and optional request id', () {
-    final form = _validForm();
+    final form = _validForm(requestId: 'request-1');
 
     expect(form.toJson(), <String, dynamic>{
+      'request_id': 'request-1',
       'software_name': 'RustDesk',
       'package_url': 'https://szxinyu.com/download/RustDesk.exe',
       'sha256': 'a' * 64,
       'installer_type': 'exe',
-      'detection_type': 'exe_path',
-      'detection_value': r'C:\Program Files\RustDesk\RustDesk.exe',
+      'detection_rule': <String, String>{
+        'exe_path': r'C:\Program Files\RustDesk\RustDesk.exe',
+      },
       'silent_args': <String>['/S'],
       'mode': 'download_and_install',
     });
-    expect(form.toJson(requestId: 'request-1')['request_id'], 'request-1');
+    expect(form.toJson(requestId: 'request-2')['request_id'], 'request-2');
+    expect(
+      RemoteSoftwareInstallForm().toJson()['request_id'],
+      matches(RegExp(r'^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$')),
+    );
     expect(form.toJson().keys, isNot(contains('command')));
     expect(form.toJson().keys, isNot(contains('shell')));
     expect(form.toJson().keys, isNot(contains('script')));
+    expect(form.toJson().keys, isNot(contains('detection_type')));
+    expect(form.toJson().keys, isNot(contains('detection_value')));
   });
 
   test('exposes the agreed enum values and gates visibility by both inputs', () {
