@@ -57,6 +57,7 @@ class UserPayload {
           : status == UserStatus.kUnverified
               ? -1
               : 1,
+      'is_admin': isAdmin,
     };
     return map;
   }

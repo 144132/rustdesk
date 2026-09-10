@@ -8,6 +8,7 @@ import 'package:flutter_hbb/models/platform_model.dart';
 import 'package:get/get.dart';
 import 'dart:convert';
 import '../utils/http_service.dart' as http;
+import 'group_access.dart';
 
 class GroupModel {
   final RxBool groupLoading = false.obs;
@@ -102,23 +103,21 @@ class GroupModel {
 
   Future<bool> _getDeviceGroups(
       List<DeviceGroupPayload> tmpDeviceGroups) async {
-    final api = "${await bind.mainGetApiServer()}/api/device-group/accessible";
     try {
-      var uri0 = Uri.parse(api);
+      final uri0 = Uri.parse(await bind.mainGetApiServer());
       final pageSize = 100;
       var total = 0;
       int current = 0;
       do {
         current += 1;
-        var uri = Uri(
-            scheme: uri0.scheme,
-            host: uri0.host,
-            path: uri0.path,
-            port: uri0.port,
-            queryParameters: {
-              'current': current.toString(),
-              'pageSize': pageSize.toString(),
-            });
+        final request = buildGroupApiRequest(
+          resource: GroupApiResource.deviceGroups,
+          isAdmin: gFFI.userModel.isAdmin.value,
+          current: current,
+          pageSize: pageSize,
+        );
+        var uri = uri0.replace(
+            path: request.path, queryParameters: request.queryParameters);
         final resp = await http.get(uri, headers: getHttpHeaders());
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
@@ -158,25 +157,21 @@ class GroupModel {
   }
 
   Future<bool> _getUsers(List<UserPayload> tmpUsers) async {
-    final api = "${await bind.mainGetApiServer()}/api/users";
     try {
-      var uri0 = Uri.parse(api);
+      var uri0 = Uri.parse(await bind.mainGetApiServer());
       final pageSize = 100;
       var total = 0;
       int current = 0;
       do {
         current += 1;
-        var uri = Uri(
-            scheme: uri0.scheme,
-            host: uri0.host,
-            path: uri0.path,
-            port: uri0.port,
-            queryParameters: {
-              'current': current.toString(),
-              'pageSize': pageSize.toString(),
-              'accessible': '',
-              'status': '1',
-            });
+        final request = buildGroupApiRequest(
+          resource: GroupApiResource.users,
+          isAdmin: gFFI.userModel.isAdmin.value,
+          current: current,
+          pageSize: pageSize,
+        );
+        var uri = uri0.replace(
+            path: request.path, queryParameters: request.queryParameters);
         final resp = await http.get(uri, headers: getHttpHeaders());
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
@@ -223,25 +218,20 @@ class GroupModel {
 
   Future<bool> _getPeers(List<Peer> tmpPeers) async {
     try {
-      final api = "${await bind.mainGetApiServer()}/api/peers";
-      var uri0 = Uri.parse(api);
+      var uri0 = Uri.parse(await bind.mainGetApiServer());
       final pageSize = 100;
       var total = 0;
       int current = 0;
       do {
         current += 1;
-        var queryParameters = {
-          'current': current.toString(),
-          'pageSize': pageSize.toString(),
-          'accessible': '',
-          'status': '1',
-        };
-        var uri = Uri(
-            scheme: uri0.scheme,
-            host: uri0.host,
-            path: uri0.path,
-            port: uri0.port,
-            queryParameters: queryParameters);
+        final request = buildGroupApiRequest(
+          resource: GroupApiResource.deviceList,
+          isAdmin: gFFI.userModel.isAdmin.value,
+          current: current,
+          pageSize: pageSize,
+        );
+        var uri = uri0.replace(
+            path: request.path, queryParameters: request.queryParameters);
         final resp = await http.get(uri, headers: getHttpHeaders());
         _statusCode = resp.statusCode;
 
@@ -298,6 +288,7 @@ class GroupModel {
     try {
       final map = (<String, dynamic>{
         "access_token": bind.mainGetLocalOption(key: 'access_token'),
+        "is_admin": gFFI.userModel.isAdmin.value,
         "device_groups": deviceGroups.map((e) => e.toGroupCacheJson()).toList(),
         "users": users.map((e) => e.toGroupCacheJson()).toList(),
         'peers': peers.map((e) => e.toGroupCacheJson()).toList()
@@ -312,12 +303,17 @@ class GroupModel {
     try {
       if (_cacheLoadOnceFlag || groupLoading.value || initialized) return;
       _cacheLoadOnceFlag = true;
+      gFFI.userModel.restoreLocalUserInfo();
       final access_token = bind.mainGetLocalOption(key: 'access_token');
       if (access_token.isEmpty) return;
       final cache = await bind.mainLoadGroup();
       if (groupLoading.value) return;
       final data = jsonDecode(cache);
       if (data == null || data['access_token'] != access_token) return;
+      if (!isGroupCacheForRole(data, gFFI.userModel.isAdmin.value)) {
+        await bind.mainClearGroup();
+        return;
+      }
       deviceGroups.clear();
       users.clear();
       peers.clear();

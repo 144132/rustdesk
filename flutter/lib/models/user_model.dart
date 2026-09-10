@@ -11,6 +11,7 @@ import '../common.dart';
 import '../utils/http_service.dart' as http;
 import 'model.dart';
 import 'platform_model.dart';
+import 'group_access.dart';
 
 bool refreshingUser = false;
 
@@ -60,6 +61,7 @@ class UserModel {
       return;
     }
     _updateLocalUserInfo();
+    final wasAdmin = isAdmin.value;
     final url = await bind.mainGetApiServer();
     final body = {
       'id': await bind.mainGetMyId(),
@@ -98,8 +100,15 @@ class UserModel {
 
       final user = UserPayload.fromJson(data);
       _parseAndUpdateUser(user);
+      if (wasAdmin && !user.isAdmin) {
+        await gFFI.groupModel.reset();
+      }
     } catch (e) {
       debugPrint('Failed to refreshCurrentUser: $e');
+      if (wasAdmin) {
+        isAdmin.value = false;
+        await gFFI.groupModel.reset();
+      }
       // Surface failures in the address book / group tabs, which offer a
       // retry. Anything not flagged above -- transport errors, non-JSON or
       // unexpected-schema bodies (e.g. a filter's block page) -- keeps the
@@ -128,6 +137,7 @@ class UserModel {
 
   _updateLocalUserInfo() {
     final userInfo = getLocalUserInfo();
+    isAdmin.value = isAdminFromUserInfo(userInfo);
     if (userInfo != null) {
       userName.value = (userInfo['name'] ?? '').toString();
       displayName.value = (userInfo['display_name'] ?? '').toString();
@@ -135,16 +145,24 @@ class UserModel {
     }
   }
 
+  void restoreLocalUserInfo() {
+    _updateLocalUserInfo();
+  }
+
   Future<void> reset({bool resetOther = false}) async {
+    final wasAdmin = isAdmin.value;
     await bind.mainSetLocalOption(key: 'access_token', value: '');
     await bind.mainSetLocalOption(key: 'user_info', value: '');
     if (resetOther) {
       await gFFI.abModel.reset();
+    }
+    if (resetOther || wasAdmin) {
       await gFFI.groupModel.reset();
     }
     userName.value = '';
     displayName.value = '';
     avatar.value = '';
+    isAdmin.value = false;
   }
 
   _parseAndUpdateUser(UserPayload user) {
