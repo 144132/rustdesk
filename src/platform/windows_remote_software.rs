@@ -1,7 +1,7 @@
 //! One operation only. Authorization, persistence and recovery scheduling belong to callers.
 use crate::remote_software::{
     installer_outcome, validate_manifest, validate_package_url, validate_sha256, InstallOutcome,
-    InstallerType, RemoteSoftwareManifest,
+    DetectionRule, InstallMode, InstallerType, RemoteSoftwareManifest, RemoteSoftwareStage,
 };
 use hbb_common::thiserror;
 use sha2::{Digest, Sha256};
@@ -36,6 +36,124 @@ pub enum RemoteSoftwareError {
 }
 
 const MAX_PACKAGE_BYTES: u64 = 2 * 1024 * 1024 * 1024;
+
+// The Windows entry point supplies the OS operations; this owns all launch/skip decisions.
+// Prepared resources (including cache locks) stay alive until the launch closure returns.
+fn run_with<P>(
+    manifest: &RemoteSoftwareManifest,
+    progress: &impl Fn(RemoteSoftwareStage, Option<u8>),
+    mut detect: impl FnMut(&DetectionRule) -> Result<bool, RemoteSoftwareError>,
+    prepare: impl FnOnce() -> Result<P, RemoteSoftwareError>,
+    launch: impl FnOnce(&P) -> Result<Option<i32>, RemoteSoftwareError>,
+) -> Result<(RemoteSoftwareStage, Option<i32>), RemoteSoftwareError> {
+    validate_manifest(manifest)?;
+    if manifest.installer_type == InstallerType::Msi && !manifest.silent_args.is_empty() {
+        return Err(RemoteSoftwareError::InvalidManifest("MSI arguments are fixed"));
+    }
+    if manifest.mode == InstallMode::DownloadAndInstall {
+        progress(RemoteSoftwareStage::Detecting, None);
+        if detect(&manifest.detection_rule)? {
+            return Ok((RemoteSoftwareStage::AlreadyInstalled, None));
+        }
+    }
+    let prepared = prepare()?;
+    if manifest.mode == InstallMode::DownloadOnly {
+        return Ok((RemoteSoftwareStage::Success, None));
+    }
+    // Another installer may have completed during a long download.
+    progress(RemoteSoftwareStage::Detecting, None);
+    if detect(&manifest.detection_rule)? {
+        return Ok((RemoteSoftwareStage::AlreadyInstalled, None));
+    }
+    progress(RemoteSoftwareStage::Installing, None);
+    let code = launch(&prepared)?;
+    let stage = match installer_outcome(code) {
+        InstallOutcome::Success => RemoteSoftwareStage::Success,
+        InstallOutcome::NeedsReboot => RemoteSoftwareStage::NeedsReboot,
+        InstallOutcome::Failed => RemoteSoftwareStage::Failed,
+    };
+    Ok((stage, code))
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RegistryView {
+    Registry64,
+    Registry32,
+}
+
+fn detect_registry_views(
+    rule: &DetectionRule,
+    mut inspect: impl FnMut(RegistryView, &DetectionRule) -> Result<bool, RemoteSoftwareError>,
+) -> Result<bool, RemoteSoftwareError> {
+    for view in [RegistryView::Registry64, RegistryView::Registry32] {
+        if inspect(view, rule)? {
+            return Ok(true);
+        }
+    }
+    Ok(false)
+}
+
+fn reject_reparse_attributes(attributes: u32) -> Result<(), RemoteSoftwareError> {
+    if attributes & 0x400 != 0 {
+        return Err(RemoteSoftwareError::Cache);
+    }
+    Ok(())
+}
+
+fn check_trusted_owner(is_system: bool, is_administrator: bool) -> Result<(), RemoteSoftwareError> {
+    if !is_system && !is_administrator {
+        return Err(RemoteSoftwareError::Cache);
+    }
+    Ok(())
+}
+
+struct PackageResponse<R> {
+    url: url::Url,
+    status: u16,
+    location: Option<String>,
+    length: Option<u64>,
+    body: R,
+}
+
+fn download_with<R: Read>(
+    manifest: &RemoteSoftwareManifest,
+    part: &Path,
+    package: &Path,
+    progress: &impl Fn(RemoteSoftwareStage, Option<u8>),
+    mut request: impl FnMut(&url::Url) -> Result<PackageResponse<R>, RemoteSoftwareError>,
+) -> Result<(), RemoteSoftwareError> {
+    let mut url = validate_package_url(&manifest.package_url)?;
+    let mut followed = 0;
+    loop {
+        validate_package_url(url.as_str())?;
+        let response = request(&url)?;
+        validate_package_url(response.url.as_str())?;
+        if matches!(response.status, 301 | 302 | 303 | 307 | 308) {
+            let location = response.location.as_deref()
+                .ok_or(RemoteSoftwareError::DownloadFailed("redirect missing Location"))?;
+            url = checked_redirect(&response.url, location, followed)?;
+            followed += 1;
+            continue;
+        }
+        if response.status != 200 {
+            return Err(RemoteSoftwareError::DownloadFailed("HTTP status rejected"));
+        }
+        let length = response.length;
+        if let Some(length) = length {
+            checked_size(0, length)?;
+        }
+        let last = std::cell::Cell::new(None);
+        write_verified(response.body, part, package, &manifest.sha256, |bytes| {
+            let percent = length.filter(|length| *length > 0)
+                .map(|length| ((bytes.saturating_mul(100) / length).min(99)) as u8);
+            if percent != last.get() {
+                progress(RemoteSoftwareStage::Downloading, percent);
+                last.set(percent);
+            }
+        })?;
+        return Ok(());
+    }
+}
 
 fn checked_size(current: u64, additional: u64) -> Result<u64, RemoteSoftwareError> {
     current
@@ -88,9 +206,7 @@ fn reject_reparse(metadata: &fs::Metadata) -> Result<(), RemoteSoftwareError> {
     #[cfg(windows)]
     {
         use std::os::windows::fs::MetadataExt;
-        if metadata.file_attributes() & 0x400 != 0 {
-            return Err(RemoteSoftwareError::Cache);
-        }
+        reject_reparse_attributes(metadata.file_attributes())?;
     }
     if metadata.file_type().is_symlink() {
         return Err(RemoteSoftwareError::Cache);
@@ -296,16 +412,20 @@ mod native {
             return Ok(Path::new(path).is_file());
         }
         let machine = RegKey::predef(HKEY_LOCAL_MACHINE);
-        for view in [KEY_WOW64_64KEY, KEY_WOW64_32KEY] {
+        detect_registry_views(rule, |view, rule| {
+            let view = match view {
+                RegistryView::Registry64 => KEY_WOW64_64KEY,
+                RegistryView::Registry32 => KEY_WOW64_32KEY,
+            };
             let uninstall = match machine.open_subkey_with_flags(UNINSTALL_KEY, KEY_READ | view) {
                 Ok(key) => key,
-                Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
                 Err(_) => return Err(RemoteSoftwareError::Detection),
             };
             if let DetectionRule::MsiProductCode(code) = rule {
                 match uninstall.open_subkey_with_flags(code, KEY_READ | view) {
                     Ok(_) => return Ok(true),
-                    Err(error) if error.kind() == io::ErrorKind::NotFound => continue,
+                    Err(error) if error.kind() == io::ErrorKind::NotFound => return Ok(false),
                     Err(_) => return Err(RemoteSoftwareError::Detection),
                 }
             }
@@ -325,21 +445,8 @@ mod native {
                     }
                 }
             }
-        }
-        Ok(false)
-    }
-
-    fn validate_exe_args(args: &[String]) -> Result<(), RemoteSoftwareError> {
-        for argument in args {
-            let lower = argument.to_ascii_lowercase();
-            if argument.contains(['&', '|', '<', '>', '^', '\r', '\n', '\0'])
-                || ["cmd.exe", "powershell", "pwsh", "wscript", "cscript", "mshta", "-encodedcommand"]
-                    .iter().any(|token| lower.contains(token))
-            {
-                return Err(RemoteSoftwareError::InvalidManifest("unsupported EXE argument"));
-            }
-        }
-        Ok(())
+            Ok(false)
+        })
     }
 
     pub fn build_process_command(
@@ -367,7 +474,6 @@ mod native {
                 command
             }
             InstallerType::Exe => {
-                validate_exe_args(&manifest.silent_args)?;
                 let mut command = Command::new(package);
                 command.args(&manifest.silent_args);
                 command
@@ -412,11 +518,20 @@ mod native {
         };
         if result.0 != 0 { return Err(RemoteSoftwareError::Cache); }
         let _descriptor = LocalDescriptor(descriptor);
-        if owner.0.is_null() || !unsafe {
-            IsWellKnownSid(owner, WinLocalSystemSid).as_bool()
-                || IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool()
-        } { return Err(RemoteSoftwareError::Cache); }
-        Ok(())
+        if owner.0.is_null() { return Err(RemoteSoftwareError::Cache); }
+        check_trusted_owner(
+            unsafe { IsWellKnownSid(owner, WinLocalSystemSid).as_bool() },
+            unsafe { IsWellKnownSid(owner, WinBuiltinAdministratorsSid).as_bool() },
+        )
+    }
+
+    fn cache_security_descriptor() -> Result<LocalDescriptor, RemoteSoftwareError> {
+        let mut descriptor = PSECURITY_DESCRIPTOR::default();
+        unsafe {
+            ConvertStringSecurityDescriptorToSecurityDescriptorW(
+                w!("O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"), 1, &mut descriptor, None)
+        }.map_err(|_| RemoteSoftwareError::Cache)?;
+        Ok(LocalDescriptor(descriptor))
     }
 
     fn prepare_cache() -> Result<CacheDirectory, RemoteSoftwareError> {
@@ -430,12 +545,7 @@ mod native {
         for ancestor in path.ancestors().collect::<Vec<_>>().into_iter().rev() {
             handles.push(directory_handle(ancestor, false)?);
         }
-        let mut descriptor = PSECURITY_DESCRIPTOR::default();
-        unsafe {
-            ConvertStringSecurityDescriptorToSecurityDescriptorW(
-                w!("O:BAG:BAD:P(A;OICI;FA;;;SY)(A;OICI;FA;;;BA)"), 1, &mut descriptor, None)
-        }.map_err(|_| RemoteSoftwareError::Cache)?;
-        let descriptor = LocalDescriptor(descriptor);
+        let descriptor = cache_security_descriptor()?;
         let attributes = SECURITY_ATTRIBUTES {
             nLength: std::mem::size_of::<SECURITY_ATTRIBUTES>() as u32,
             lpSecurityDescriptor: descriptor.0.0,
@@ -483,59 +593,43 @@ mod native {
             .timeout(Duration::from_secs(30 * 60))
             .no_gzip().no_zstd()
             .build().map_err(|_| RemoteSoftwareError::DownloadFailed("HTTP client unavailable"))?;
-        let mut url = validate_package_url(&manifest.package_url)?;
-        let mut followed = 0;
-        loop {
-            validate_package_url(url.as_str())?;
+        download_with(manifest, part, package, progress, |url| {
             let response = client.get(url.clone()).send()
                 .map_err(|_| RemoteSoftwareError::DownloadFailed("request failed"))?;
-            validate_package_url(response.url().as_str())?;
-            if matches!(response.status().as_u16(), 301 | 302 | 303 | 307 | 308) {
-                let location = response.headers().get(reqwest::header::LOCATION)
-                    .and_then(|value| value.to_str().ok())
-                    .ok_or(RemoteSoftwareError::DownloadFailed("redirect missing Location"))?;
-                url = checked_redirect(response.url(), location, followed)?;
-                followed += 1;
-                continue;
-            }
-            if response.status() != reqwest::StatusCode::OK {
-                return Err(RemoteSoftwareError::DownloadFailed("HTTP status rejected"));
-            }
-            let length = response.content_length();
-            if let Some(length) = length { checked_size(0, length)?; }
-            let last = std::cell::Cell::new(None);
-            write_verified(response, part, package, &manifest.sha256, |bytes| {
-                let percent = length.filter(|length| *length > 0)
-                    .map(|length| ((bytes.saturating_mul(100) / length).min(99)) as u8);
-                if percent != last.get() {
-                    progress(RemoteSoftwareStage::Downloading, percent);
-                    last.set(percent);
-                }
-            })?;
-            return Ok(());
-        }
+            Ok(PackageResponse {
+                url: response.url().clone(),
+                status: response.status().as_u16(),
+                location: response.headers().get(reqwest::header::LOCATION)
+                    .and_then(|value| value.to_str().ok()).map(str::to_owned),
+                length: response.content_length(),
+                body: response,
+            })
+        })
     }
 
     fn run(
         manifest: &RemoteSoftwareManifest,
         progress: &impl Fn(RemoteSoftwareStage, Option<u8>),
     ) -> Result<(RemoteSoftwareStage, Option<i32>), RemoteSoftwareError> {
-        validate_manifest(manifest)?;
         validate_detection(&manifest.detection_rule)?;
-        // Fail malformed execution requests before any registry/network/cache work.
-        match manifest.installer_type {
-            InstallerType::Exe => validate_exe_args(&manifest.silent_args)?,
-            InstallerType::Msi if !manifest.silent_args.is_empty() => {
-                return Err(RemoteSoftwareError::InvalidManifest("MSI arguments are fixed"));
-            }
-            InstallerType::Msi => {},
-        }
-        if manifest.mode == InstallMode::DownloadAndInstall {
-            progress(RemoteSoftwareStage::Detecting, None);
-            if detect_installed(&manifest.detection_rule)? {
-                return Ok((RemoteSoftwareStage::AlreadyInstalled, None));
-            }
-        }
+        run_with(
+            manifest,
+            progress,
+            detect_installed,
+            || prepare_package(manifest, progress),
+            |(directory, package, _verified)| {
+                let mut command = build_process_command(manifest, package)?;
+                command.current_dir(&directory.path);
+                let exit = command.status().map_err(|_| RemoteSoftwareError::Installer)?;
+                Ok(exit.code())
+            },
+        )
+    }
+
+    fn prepare_package(
+        manifest: &RemoteSoftwareManifest,
+        progress: &impl Fn(RemoteSoftwareStage, Option<u8>),
+    ) -> Result<(CacheDirectory, PathBuf, File), RemoteSoftwareError> {
         let directory = prepare_cache()?;
         let (part, package) = cache_paths(&directory.path, manifest)?;
         remove_cache_file(&part)?;
@@ -549,25 +643,61 @@ mod native {
                 verified_cache(&package, &manifest.sha256)?.ok_or(RemoteSoftwareError::ChecksumMismatch)?
             }
         };
-        if manifest.mode == InstallMode::DownloadOnly {
-            return Ok((RemoteSoftwareStage::Success, None));
+        Ok((directory, package, verified))
+    }
+
+    #[cfg(test)]
+    mod boundary_tests {
+        use super::*;
+        use windows::Win32::Security::{GetAce, GetSecurityDescriptorControl, ACCESS_ALLOWED_ACE};
+
+        #[test]
+        fn cache_descriptor_grants_only_inheritable_system_and_admin_access() {
+            let descriptor = cache_security_descriptor().unwrap();
+            let mut control = 0u16;
+            let mut revision = 0;
+            let mut present = Default::default();
+            let mut defaulted = Default::default();
+            let mut dacl = std::ptr::null_mut();
+            unsafe {
+                GetSecurityDescriptorControl(descriptor.0, &mut control, &mut revision).unwrap();
+                assert_ne!(control & 0x1000, 0, "DACL must be protected from inheritance");
+                GetSecurityDescriptorDacl(descriptor.0, &mut present, &mut dacl, &mut defaulted).unwrap();
+                assert!(present.as_bool());
+                assert!(!dacl.is_null());
+                assert_eq!((*dacl).AceCount, 2);
+                let mut system = 0;
+                let mut administrators = 0;
+                for index in 0..2 {
+                    let mut ace = std::ptr::null_mut();
+                    GetAce(dacl, index, &mut ace).unwrap();
+                    let ace = &*ace.cast::<ACCESS_ALLOWED_ACE>();
+                    assert_eq!(ace.Header.AceType, 0, "only allow ACEs");
+                    assert_eq!(ace.Header.AceFlags, 3, "inherit to files and directories");
+                    assert_eq!(ace.Mask, 0x001f_01ff, "full file access");
+                    let sid = PSID(std::ptr::addr_of!(ace.SidStart).cast_mut().cast());
+                    if IsWellKnownSid(sid, WinLocalSystemSid).as_bool() { system += 1; }
+                    else if IsWellKnownSid(sid, WinBuiltinAdministratorsSid).as_bool() { administrators += 1; }
+                    else { panic!("unexpected cache principal"); }
+                }
+                assert_eq!((system, administrators), (1, 1));
+            }
         }
-        // Recheck after a potentially long download; another installer may have completed.
-        progress(RemoteSoftwareStage::Detecting, None);
-        if detect_installed(&manifest.detection_rule)? {
-            return Ok((RemoteSoftwareStage::AlreadyInstalled, None));
+
+        #[test]
+        fn directory_guard_denies_rename_until_released_and_rejects_files() {
+            let path = std::env::temp_dir().join(format!("remote-software-guard-{}", uuid::Uuid::new_v4()));
+            let renamed = path.with_extension("renamed");
+            fs::create_dir(&path).unwrap();
+            let guard = directory_handle(&path, false).unwrap();
+            assert!(fs::rename(&path, &renamed).is_err());
+            drop(guard);
+            fs::rename(&path, &renamed).unwrap();
+            fs::remove_dir(&renamed).unwrap();
+            fs::write(&path, b"not a directory").unwrap();
+            assert!(directory_handle(&path, false).is_err());
+            fs::remove_file(&path).unwrap();
         }
-        let mut command = build_process_command(manifest, &package)?;
-        command.current_dir(&directory.path);
-        progress(RemoteSoftwareStage::Installing, None);
-        let exit = command.status().map_err(|_| RemoteSoftwareError::Installer)?;
-        drop(verified);
-        let stage = match installer_outcome(exit.code()) {
-            InstallOutcome::Success => RemoteSoftwareStage::Success,
-            InstallOutcome::NeedsReboot => RemoteSoftwareStage::NeedsReboot,
-            InstallOutcome::Failed => RemoteSoftwareStage::Failed,
-        };
-        Ok((stage, exit.code()))
     }
 
     pub async fn execute(
@@ -665,15 +795,21 @@ mod tests {
 
     #[cfg(windows)]
     #[test]
-    fn exe_command_preserves_argument_boundaries_and_rejects_shell_forms() {
+    fn exe_command_preserves_literal_arguments_and_rejects_control_characters() {
         let mut manifest = test_msi_manifest();
         manifest.installer_type = InstallerType::Exe;
         manifest.package_url = "https://szxinyu.com/app.exe".into();
-        manifest.silent_args = vec!["/S".into(), r"/D=C:\Program Files\Example".into()];
+        manifest.silent_args = vec![
+            "/S".into(),
+            r"/D=C:\Program Files\R&D".into(),
+            r"/Tools=C:\PowerShellTools\pwsh".into(),
+            "/Label=a^b|c<d>e".into(),
+            r#"/Label=quoted "value""#.into(),
+        ];
         let command = build_process_command(&manifest, Path::new(r"C:\pkg\app.exe")).unwrap();
         assert_eq!(command.get_program(), Path::new(r"C:\pkg\app.exe"));
         assert_eq!(command.get_args().collect::<Vec<_>>(), manifest.silent_args.iter().map(std::ffi::OsStr::new).collect::<Vec<_>>());
-        for argument in ["/S & whoami", "powershell.exe", "-EncodedCommand", "a|b", ">out"] {
+        for argument in ["/S\n", "/S\r", "/S\0", "/S\t"] {
             manifest.silent_args = vec![argument.into()];
             assert!(build_process_command(&manifest, Path::new(r"C:\pkg\app.exe")).is_err());
         }
@@ -772,5 +908,232 @@ mod tests {
         drop(verified);
         std::fs::remove_file(&package).unwrap();
         std::fs::remove_dir(&dir).unwrap();
+    }
+
+    // These closures substitute OS boundaries, while production run_with owns the
+    // ordering/skip decisions and download_with performs the real hash/cache work.
+    #[test]
+    fn run_never_launches_after_download_checksum_failure() {
+        let manifest = test_msi_manifest();
+        let dir = unique_test_path("run-checksum", "dir");
+        fs::create_dir(&dir).unwrap();
+        let (part, package) = cache_paths(&dir, &manifest).unwrap();
+        let result = run_with(
+            &manifest,
+            &|_, _| {},
+            |_| Ok(false),
+            || {
+                download_with(&manifest, &part, &package, &|_, _| {}, |url| {
+                    Ok(PackageResponse {
+                        url: url.clone(), status: 200, location: None, length: None,
+                        body: Cursor::new(b"corrupt"),
+                    })
+                })?;
+                Ok(())
+            },
+            |_| panic!("checksum failure must not launch"),
+        );
+        assert!(matches!(result, Err(RemoteSoftwareError::ChecksumMismatch)));
+        assert!(!part.exists());
+        assert!(!package.exists());
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn run_download_only_verifies_without_detection_or_launch() {
+        let mut manifest = test_msi_manifest();
+        manifest.mode = InstallMode::DownloadOnly;
+        let dir = unique_test_path("run-download", "dir");
+        fs::create_dir(&dir).unwrap();
+        let (part, package) = cache_paths(&dir, &manifest).unwrap();
+        let result = run_with(
+            &manifest,
+            &|_, _| {},
+            |_| panic!("download-only must not detect"),
+            || {
+                download_with(&manifest, &part, &package, &|_, _| {}, |url| {
+                    Ok(PackageResponse {
+                        url: url.clone(), status: 200, location: None, length: Some(3),
+                        body: Cursor::new(b"abc"),
+                    })
+                })?;
+                verified_cache(&package, &manifest.sha256)?.ok_or(RemoteSoftwareError::Cache)
+            },
+            |_| panic!("download-only must not launch"),
+        ).unwrap();
+        assert_eq!(result, (RemoteSoftwareStage::Success, None));
+        assert_eq!(fs::read(&package).unwrap(), b"abc");
+        fs::remove_file(package).unwrap();
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn run_already_installed_skips_cache_and_launch() {
+        let result = run_with::<()>(
+            &test_msi_manifest(), &|_, _| {}, |_| Ok(true),
+            || panic!("already installed must not prepare cache"),
+            |_| panic!("already installed must not launch"),
+        ).unwrap();
+        assert_eq!(result, (RemoteSoftwareStage::AlreadyInstalled, None));
+    }
+
+    #[test]
+    fn run_rechecks_detection_and_retains_prepared_resource_until_exit() {
+        use std::cell::{Cell, RefCell};
+        struct Prepared<'a>(&'a Cell<bool>);
+        impl Drop for Prepared<'_> {
+            fn drop(&mut self) { self.0.set(true); }
+        }
+        for installed_after_download in [false, true] {
+            let events = RefCell::new(Vec::new());
+            let dropped = Cell::new(false);
+            let mut detections = 0;
+            let result = run_with(
+                &test_msi_manifest(), &|_, _| {},
+                |_| {
+                    events.borrow_mut().push("detect");
+                    detections += 1;
+                    Ok(detections == 2 && installed_after_download)
+                },
+                || { events.borrow_mut().push("prepare"); Ok(Prepared(&dropped)) },
+                |_| {
+                    assert!(!dropped.get(), "verified resource released before launch");
+                    events.borrow_mut().push("launch");
+                    Ok(Some(3010))
+                },
+            ).unwrap();
+            assert!(dropped.get());
+            if installed_after_download {
+                assert_eq!(*events.borrow(), ["detect", "prepare", "detect"]);
+                assert_eq!(result, (RemoteSoftwareStage::AlreadyInstalled, None));
+            } else {
+                assert_eq!(*events.borrow(), ["detect", "prepare", "detect", "launch"]);
+                assert_eq!(result, (RemoteSoftwareStage::NeedsReboot, Some(3010)));
+            }
+        }
+    }
+
+    #[test]
+    fn run_rejects_manifest_controls_before_any_side_effect() {
+        let mut manifest = test_msi_manifest();
+        manifest.installer_type = InstallerType::Exe;
+        manifest.package_url = "https://szxinyu.com/app.exe".into();
+        manifest.silent_args = vec!["/D=bad\npath".into()];
+        assert!(run_with::<()>(
+            &manifest, &|_, _| {},
+            |_| panic!("invalid manifest must not detect"),
+            || panic!("invalid manifest must not prepare"),
+            |_| panic!("invalid manifest must not launch"),
+        ).is_err());
+        manifest.silent_args = vec![r"/D=C:\Program Files\R&D\PowerShellTools^pwsh".into()];
+        assert!(run_with(&manifest, &|_, _| {}, |_| Ok(false), || Ok(()), |_| Ok(Some(0))).is_ok());
+    }
+
+    #[test]
+    fn registry_detection_consults_both_views_for_both_rule_types() {
+        for rule in [test_msi_manifest().detection_rule, DetectionRule::UninstallDisplayName("Example".into())] {
+            for installed in [None, Some(RegistryView::Registry32), Some(RegistryView::Registry64)] {
+                let mut consulted = Vec::new();
+                let found = detect_registry_views(&rule, |view, received_rule| {
+                    assert_eq!(received_rule, &rule);
+                    consulted.push(view);
+                    Ok(Some(view) == installed)
+                }).unwrap();
+                assert_eq!(found, installed.is_some());
+                let expected = if installed == Some(RegistryView::Registry64) {
+                    vec![RegistryView::Registry64]
+                } else { vec![RegistryView::Registry64, RegistryView::Registry32] };
+                assert_eq!(consulted, expected);
+            }
+        }
+        assert!(detect_registry_views(&test_msi_manifest().detection_rule, |_, _| {
+            Err(RemoteSoftwareError::Detection)
+        }).is_err());
+    }
+
+    #[test]
+    fn transport_checks_initial_redirect_and_final_urls_before_writing() {
+        let mut manifest = test_msi_manifest();
+        let dir = unique_test_path("transport", "dir");
+        fs::create_dir(&dir).unwrap();
+        let (part, package) = cache_paths(&dir, &manifest).unwrap();
+        manifest.package_url = "https://evil-szxinyu.com/app.msi".into();
+        assert!(download_with::<Cursor<Vec<u8>>>(
+            &manifest, &part, &package, &|_, _| {},
+            |_| panic!("invalid initial URL must not reach transport"),
+        ).is_err());
+        manifest = test_msi_manifest();
+        for bad_final in [false, true] {
+            let mut calls = 0;
+            assert!(download_with(&manifest, &part, &package, &|_, _| {}, |url| {
+                calls += 1;
+                assert_eq!(calls, 1, "invalid redirect must not be requested");
+                Ok(PackageResponse {
+                    url: if bad_final { url::Url::parse("https://evil.example/app.msi").unwrap() } else { url.clone() },
+                    status: if bad_final { 200 } else { 302 },
+                    location: Some("https://evil.example/app.msi".into()), length: Some(3),
+                    body: Cursor::new(b"abc"),
+                })
+            }).is_err());
+            assert!(!part.exists());
+            assert!(!package.exists());
+        }
+        let mut calls = 0;
+        assert!(download_with(&manifest, &part, &package, &|_, _| {}, |url| {
+            calls += 1;
+            Ok(PackageResponse {
+                url: url.clone(), status: 302, location: Some("/again.msi".into()),
+                length: None, body: Cursor::new(b""),
+            })
+        }).is_err());
+        assert_eq!(calls, 6, "initial request plus five redirects");
+        assert!(!part.exists());
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn transport_follows_approved_redirect_and_rejects_oversized_headers() {
+        let manifest = test_msi_manifest();
+        let dir = unique_test_path("approved-transport", "dir");
+        fs::create_dir(&dir).unwrap();
+        let (part, package) = cache_paths(&dir, &manifest).unwrap();
+        let mut requested = Vec::new();
+        download_with(&manifest, &part, &package, &|_, _| {}, |url| {
+            requested.push(url.as_str().to_owned());
+            let redirect = requested.len() == 1;
+            Ok(PackageResponse {
+                url: url.clone(), status: if redirect { 302 } else { 200 },
+                location: redirect.then(|| "https://szxinyu.com/final.msi".into()),
+                length: Some(3), body: Cursor::new(b"abc"),
+            })
+        }).unwrap();
+        assert_eq!(requested, ["https://update.szxinyu.com/office.msi", "https://szxinyu.com/final.msi"]);
+        assert_eq!(fs::read(&package).unwrap(), b"abc");
+        fs::remove_file(&package).unwrap();
+        let oversized = download_with(&manifest, &part, &package, &|_, _| {}, |url| {
+            Ok(PackageResponse {
+                url: url.clone(), status: 200, location: None, length: Some(2_147_483_649),
+                body: InterruptedReader,
+            })
+        });
+        assert!(matches!(oversized, Err(RemoteSoftwareError::DownloadFailed("package exceeds 2 GiB"))));
+        assert!(!part.exists());
+        assert!(!package.exists());
+        fs::remove_dir(dir).unwrap();
+    }
+
+    #[test]
+    fn cache_policy_rejects_reparse_points_and_untrusted_owners() {
+        assert!(reject_reparse_attributes(0x10).is_ok());
+        assert!(reject_reparse_attributes(0x410).is_err());
+        assert!(reject_reparse_attributes(0x400).is_err());
+        assert!(check_trusted_owner(true, false).is_ok());
+        assert!(check_trusted_owner(false, true).is_ok());
+        assert!(check_trusted_owner(false, false).is_err());
+        assert!(run_with::<()>(
+            &test_msi_manifest(), &|_, _| {}, |_| Ok(false),
+            || { reject_reparse_attributes(0x410)?; Ok(()) },
+            |_| panic!("unsafe cache must not launch"),
+        ).is_err());
     }
 }
