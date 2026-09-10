@@ -107,9 +107,16 @@ fn parse_software_install_request(manifest_json: &str) -> Result<SoftwareInstall
     })
 }
 
+fn software_install_ffi_result<E: std::fmt::Display>(result: Result<(), E>) -> String {
+    match result {
+        Ok(()) => String::new(),
+        Err(error) => error.to_string(),
+    }
+}
+
 #[cfg(test)]
 mod software_install_ffi_tests {
-    use super::parse_software_install_request;
+    use super::{parse_software_install_request, software_install_ffi_result};
     use hbb_common::message_proto::{SoftwareDetectionType, SoftwareInstallMode};
 
     fn corrected_manifest() -> String {
@@ -153,6 +160,34 @@ mod software_install_ffi_tests {
         manifest["shell"] = serde_json::json!("cmd.exe /c whoami");
 
         assert!(parse_software_install_request(&manifest.to_string()).is_err());
+    }
+
+    #[test]
+    fn converts_software_install_dispatch_errors_to_ffi_messages() {
+        assert_eq!(software_install_ffi_result(Ok::<(), &str>(())), "");
+        assert_eq!(
+            software_install_ffi_result(Err::<(), _>("session not found")),
+            "session not found"
+        );
+    }
+
+    #[test]
+    fn remote_software_install_exports_use_codegen_compatible_return_types() {
+        let source = include_str!("flutter_ffi.rs");
+        for function_name in ["session_software_install", "session_software_install_cancel"] {
+            let marker = format!("pub fn {function_name}(");
+            let start = source
+                .find(&marker)
+                .expect("remote software install export must exist");
+            let signature_end = source[start..]
+                .find('{')
+                .expect("remote software install export must have a body");
+            let signature = &source[start..start + signature_end];
+            assert!(
+                signature.contains("-> SyncReturn<String>"),
+                "{function_name} must use SyncReturn<String> for the pinned Flutter Rust Bridge codegen"
+            );
+        }
     }
 }
 
@@ -326,41 +361,47 @@ pub fn session_start_with_displays(
 pub fn session_software_install(
     session_id: SessionID,
     manifest_json: String,
-) -> ResultType<()> {
-    let request =
-        parse_software_install_request(&manifest_json).map_err(|error| anyhow!("{error}"))?;
-    let mut action = SoftwareInstallAction::new();
-    action.set_request(request);
-    let mut message = Message::new();
-    message.set_software_install_action(action);
+) -> SyncReturn<String> {
+    let result = (|| {
+        let request =
+            parse_software_install_request(&manifest_json).map_err(|error| anyhow!("{error}"))?;
+        let mut action = SoftwareInstallAction::new();
+        action.set_request(request);
+        let mut message = Message::new();
+        message.set_software_install_action(action);
 
-    let Some(session) = sessions::get_session_by_session_id(&session_id) else {
-        return Err(anyhow!("session not found: {session_id}"));
-    };
-    session.send(crate::client::Data::Message(message));
-    Ok(())
+        let Some(session) = sessions::get_session_by_session_id(&session_id) else {
+            return Err(anyhow!("session not found: {session_id}"));
+        };
+        session.send(crate::client::Data::Message(message));
+        Ok(())
+    })();
+    SyncReturn(software_install_ffi_result(result))
 }
 
 pub fn session_software_install_cancel(
     session_id: SessionID,
     request_id: String,
-) -> ResultType<()> {
-    if request_id.trim().is_empty() {
-        return Err(anyhow!("request_id must not be empty"));
-    }
+) -> SyncReturn<String> {
+    let result = (|| {
+        if request_id.trim().is_empty() {
+            return Err(anyhow!("request_id must not be empty"));
+        }
 
-    let Some(session) = sessions::get_session_by_session_id(&session_id) else {
-        return Err(anyhow!("session not found: {session_id}"));
-    };
-    let mut action = SoftwareInstallAction::new();
-    action.set_cancel(SoftwareInstallCancel {
-        request_id,
-        ..Default::default()
-    });
-    let mut message = Message::new();
-    message.set_software_install_action(action);
-    session.send(crate::client::Data::Message(message));
-    Ok(())
+        let Some(session) = sessions::get_session_by_session_id(&session_id) else {
+            return Err(anyhow!("session not found: {session_id}"));
+        };
+        let mut action = SoftwareInstallAction::new();
+        action.set_cancel(SoftwareInstallCancel {
+            request_id,
+            ..Default::default()
+        });
+        let mut message = Message::new();
+        message.set_software_install_action(action);
+        session.send(crate::client::Data::Message(message));
+        Ok(())
+    })();
+    SyncReturn(software_install_ffi_result(result))
 }
 
 pub fn session_get_remember(session_id: SessionID) -> Option<bool> {
