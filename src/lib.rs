@@ -62,6 +62,7 @@ mod ui_cm_interface;
 mod ui_interface;
 mod ui_session_interface;
 mod server_config_policy;
+pub mod remote_software;
 
 mod hbbs_http;
 
