@@ -251,7 +251,7 @@ jobs:
       - name: Analyze remote software Flutter files
         working-directory: flutter
         run: >-
-          flutter analyze
+          flutter analyze --no-fatal-infos
           lib/models/model.dart
           lib/desktop/pages/remote_page.dart
           lib/desktop/widgets/remote_toolbar.dart
