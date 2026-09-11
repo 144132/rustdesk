@@ -124,6 +124,8 @@ impl Drop for SimpleCallOnReturn {
 }
 
 pub fn global_init() -> bool {
+    #[cfg(target_os = "android")]
+    ensure_default_permanent_password();
     #[cfg(all(target_os = "linux", feature = "drm"))]
     crate::platform::linux::dispatch_wayland_display_probe();
     #[cfg(target_os = "linux")]
@@ -1122,7 +1124,79 @@ pub fn get_app_name() -> String {
 }
 
 pub const CLIENT_DISPLAY_NAME: &str = "新育智慧校园远程协助";
-pub const DEFAULT_CONNECT_PASSWORD: &str = "Ooo000#@!";
+/// Permanent password applied to Windows/Android hosts on first start and after an upgrade.
+pub const DEFAULT_PERMANENT_PASSWORD: &str = "Ooo000#@!";
+/// Kept as the outgoing connection fallback for existing custom-client behavior.
+pub const DEFAULT_CONNECT_PASSWORD: &str = DEFAULT_PERMANENT_PASSWORD;
+const DEFAULT_PERMANENT_PASSWORD_POLICY_VERSION_OPTION: &str =
+    "xinyu-default-permanent-password-version";
+
+#[inline]
+pub fn is_permanent_password_change_locked() -> bool {
+    cfg!(target_os = "android")
+}
+
+/// Returns whether the one-time default permanent-password migration is required.
+///
+/// A missing marker means the installation predates this policy (including a first install).
+/// Once the current version has been recorded, restarting that same version must not overwrite
+/// a password the user may have chosen afterwards. Downgrades are also left untouched.
+pub fn should_reset_default_permanent_password(
+    stored_version: Option<&str>,
+    current_version: &str,
+) -> bool {
+    let current = get_version_number(current_version);
+    stored_version
+        .map(|version| get_version_number(version) < current)
+        .unwrap_or(true)
+}
+
+/// Ensures that the host's permanent password is initialized for this application version.
+///
+/// This is intentionally driven by a persisted version marker rather than by every process
+/// startup. The marker lives with the host configuration, so a normal restart does not replace a
+/// password changed by the user, while a first install or a lower-version upgrade is migrated.
+#[cfg(any(target_os = "windows", target_os = "android"))]
+pub fn ensure_default_permanent_password() {
+    if config::is_outgoing_only() {
+        return;
+    }
+
+    let stored_version = config::Status::get(DEFAULT_PERMANENT_PASSWORD_POLICY_VERSION_OPTION);
+    if !should_reset_default_permanent_password(
+        (!stored_version.is_empty()).then_some(stored_version.as_str()),
+        crate::VERSION,
+    ) {
+        return;
+    }
+
+    let updated = {
+        #[cfg(target_os = "android")]
+        {
+            Config::set_permanent_password_forced(DEFAULT_PERMANENT_PASSWORD)
+        }
+        #[cfg(target_os = "windows")]
+        {
+            Config::set_permanent_password(DEFAULT_PERMANENT_PASSWORD)
+        }
+    };
+    if !updated {
+        log::warn!(
+            "Failed to initialize the default permanent password for version {}",
+            crate::VERSION
+        );
+        return;
+    }
+
+    config::Status::set(
+        DEFAULT_PERMANENT_PASSWORD_POLICY_VERSION_OPTION,
+        crate::VERSION.to_owned(),
+    );
+    log::info!(
+        "Initialized the default permanent password for version {}",
+        crate::VERSION
+    );
+}
 
 #[inline]
 pub fn get_display_name() -> String {
@@ -2495,6 +2569,11 @@ pub fn builtin_option_default(key: &str) -> Option<&'static str> {
 
 #[inline]
 pub fn get_builtin_option(key: &str) -> String {
+    if is_permanent_password_change_locked()
+        && key == keys::OPTION_DISABLE_CHANGE_PERMANENT_PASSWORD
+    {
+        return "Y".to_owned();
+    }
     config::BUILTIN_SETTINGS
         .read()
         .unwrap()
@@ -3121,6 +3200,31 @@ mod tests {
             Some("Ooo000#@!")
         );
         assert_eq!(get_display_name(), "新育智慧校园远程协助");
+    }
+
+    #[test]
+    fn test_default_permanent_password_policy_reset_decision() {
+        assert!(should_reset_default_permanent_password(None, "1.5.1"));
+        assert!(should_reset_default_permanent_password(
+            Some("1.5.0"),
+            "1.5.1"
+        ));
+        assert!(!should_reset_default_permanent_password(
+            Some("1.5.1"),
+            "1.5.1"
+        ));
+        assert!(!should_reset_default_permanent_password(
+            Some("1.6.0"),
+            "1.5.1"
+        ));
+    }
+
+    #[test]
+    fn test_android_permanent_password_change_lock_policy() {
+        assert_eq!(
+            is_permanent_password_change_locked(),
+            cfg!(target_os = "android")
+        );
     }
 
     #[test]

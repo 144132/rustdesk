@@ -574,6 +574,8 @@ pub fn check_zombie() {
 #[cfg(any(target_os = "android", target_os = "ios"))]
 #[tokio::main]
 pub async fn start_server(_is_server: bool) {
+    #[cfg(target_os = "android")]
+    crate::common::ensure_default_permanent_password();
     crate::RendezvousMediator::start_all().await;
 }
 
@@ -601,6 +603,8 @@ pub async fn start_server(is_server: bool, no_server: bool) {
     });
 
     if is_server {
+        #[cfg(target_os = "windows")]
+        crate::common::ensure_default_permanent_password();
         crate::common::set_server_running(true);
         std::thread::spawn(move || {
             if let Err(err) = crate::ipc::start("") {
