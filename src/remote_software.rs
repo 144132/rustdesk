@@ -356,10 +356,11 @@ mod tests {
 
     #[test]
     fn software_install_request_schema_has_no_arbitrary_command_field() {
-        let fields = SoftwareInstallRequest::descriptor().fields();
         for forbidden_name in ["command", "shell", "script"] {
             assert!(
-                fields.iter().all(|field| field.name() != forbidden_name),
+                SoftwareInstallRequest::descriptor()
+                    .fields()
+                    .all(|field| field.name() != forbidden_name),
                 "forbidden software install request field: {forbidden_name}"
             );
         }
