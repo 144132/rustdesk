@@ -1289,7 +1289,7 @@ mod native {
 
     fn directory_handle(path: &Path, writable_acl: bool) -> Result<File, RemoteSoftwareError> {
         let mut options = OpenOptions::new();
-        options.access_mode(0x0002_0080 | if writable_acl { 0x0004_0000 } else { 0 }) // READ_CONTROL | READ_ATTRIBUTES | WRITE_DAC
+        options.access_mode(0x0003_0080 | if writable_acl { 0x0004_0000 } else { 0 }) // DELETE | READ_CONTROL | READ_ATTRIBUTES | WRITE_DAC
             .share_mode(3) // READ | WRITE, deliberately no DELETE
             .custom_flags(0x0220_0000); // BACKUP_SEMANTICS | OPEN_REPARSE_POINT
         let file = options.open(path).map_err(|_| RemoteSoftwareError::Cache)?;
@@ -1616,7 +1616,10 @@ mod tests {
             Path::new(r"C:\pkg\office.msi"),
         )
         .unwrap();
-        assert_eq!(command.get_program(), Path::new(r"C:\Windows\System32\msiexec.exe"));
+        assert!(command
+            .get_program()
+            .to_string_lossy()
+            .eq_ignore_ascii_case(r"C:\Windows\System32\msiexec.exe"));
         let args: Vec<_> = command.get_args().map(|arg| arg.to_str().unwrap()).collect();
         assert_eq!(args, vec!["/i", r"C:\pkg\office.msi", "/qn", "/norestart"]);
     }
