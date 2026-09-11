@@ -57,10 +57,14 @@ def test_display_name_defaults_to_app_name():
 
 def test_msi_templates_use_display_name_only_for_visible_shortcuts():
     wxl = (MSI_DIR / "Package" / "Language" / "Package.en-us.wxl").read_text(encoding="utf-8")
+    package = (MSI_DIR / "Package" / "Package.wxs").read_text(encoding="utf-8")
     folders = (MSI_DIR / "Package" / "Components" / "Folders.wxs").read_text(encoding="utf-8")
     rustdesk = (MSI_DIR / "Package" / "Components" / "RustDesk.wxs").read_text(encoding="utf-8")
 
     assert wxl.count("__MSI_DISPLAY_NAME__") == 6
+    assert 'WixLocalization Culture="en-us" Codepage="936"' in wxl
+    assert 'String Id="SummaryCodepage" Value="936"' in wxl
+    assert 'Scope="perMachine" Codepage="936"' in package
     assert 'Directory Id="App.StartMenu" Name="__MSI_DISPLAY_NAME__"' in folders
     assert 'Value="$(var.Product)"' not in folders
     assert 'Value="__MSI_DISPLAY_NAME__ Tray"' in rustdesk
