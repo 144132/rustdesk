@@ -287,15 +287,18 @@ class AbTag {
 }
 
 class DeviceGroupPayload {
+  String id;
   String name;
 
-  DeviceGroupPayload(this.name);
+  DeviceGroupPayload(this.name, {this.id = ''});
 
   DeviceGroupPayload.fromJson(Map<String, dynamic> json)
-      : name = json['name'] ?? '';
+      : id = (json['id'] ?? json['row_id'])?.toString() ?? '',
+        name = json['name'] ?? '';
 
   Map<String, dynamic> toGroupCacheJson() {
     final Map<String, dynamic> map = {
+      'id': id,
       'name': name,
     };
     return map;

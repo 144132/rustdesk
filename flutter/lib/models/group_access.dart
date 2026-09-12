@@ -109,7 +109,10 @@ String _normalizeAdminPeerOs(dynamic value) {
   return os;
 }
 
-Map<String, dynamic> normalizeAdminPeerPayload(Map<String, dynamic> peer) {
+Map<String, dynamic> normalizeAdminPeerPayload(
+  Map<String, dynamic> peer, {
+  Map<String, String> deviceGroupNamesById = const <String, String>{},
+}) {
   var userName = '';
   final user = peer['user'];
   if (user is Map) {
@@ -118,6 +121,12 @@ Map<String, dynamic> normalizeAdminPeerPayload(Map<String, dynamic> peer) {
   if (userName.isEmpty) {
     userName = (peer['user_name'] ?? '').toString();
   }
+  final explicitGroupName =
+      (peer['device_group_name'] ?? peer['group_name'] ?? '').toString();
+  final groupId = peer['group_id']?.toString() ?? '';
+  final deviceGroupName = explicitGroupName.isNotEmpty
+      ? explicitGroupName
+      : deviceGroupNamesById[groupId] ?? '';
 
   return <String, dynamic>{
     'id': peer['id'] ?? '',
@@ -127,8 +136,7 @@ Map<String, dynamic> normalizeAdminPeerPayload(Map<String, dynamic> peer) {
       'username': peer['username'] ?? '',
     },
     'user_name': userName,
-    'device_group_name':
-        peer['device_group_name'] ?? peer['group_name'] ?? '',
+    'device_group_name': deviceGroupName,
     'note': peer['alias'] ?? '',
   };
 }

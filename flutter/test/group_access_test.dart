@@ -194,9 +194,10 @@ void main() {
         'hostname': 'PC-01',
         'os': 'Windows 11',
         'username': 'eric',
+        'group_id': 42,
         'user': {'name': '管理员'},
         'alias': '办公室电脑',
-      });
+      }, deviceGroupNamesById: {'42': '办公室'});
 
       expect(payload['id'], 'peer-1');
       expect(payload['info'], {
@@ -205,7 +206,21 @@ void main() {
         'username': 'eric',
       });
       expect(payload['user_name'], '管理员');
+      expect(payload['device_group_name'], '办公室');
       expect(payload['note'], '办公室电脑');
+    });
+
+    test('keeps the backend device group id in the group payload cache', () {
+      final group = DeviceGroupPayload.fromJson({
+        'id': 42,
+        'name': '办公室',
+      });
+
+      expect(group.id, '42');
+      expect(group.toGroupCacheJson(), {
+        'id': '42',
+        'name': '办公室',
+      });
     });
   });
 

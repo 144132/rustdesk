@@ -69,12 +69,19 @@ class GroupModel {
       // return;
     }
     tmpDeviceGroups.sort((a, b) => a.name.compareTo(b.name));
+    final deviceGroupNamesById = <String, String>{
+      for (final group in tmpDeviceGroups)
+        if (group.id.isNotEmpty) group.id: group.name,
+    };
     List<UserPayload> tmpUsers = List.empty(growable: true);
     if (!await _getUsers(tmpUsers)) {
       return;
     }
     List<Peer> tmpPeers = List.empty(growable: true);
-    if (!await _getPeers(tmpPeers)) {
+    if (!await _getPeers(
+      tmpPeers,
+      deviceGroupNamesById: deviceGroupNamesById,
+    )) {
       return;
     }
     deviceGroups.value = tmpDeviceGroups;
@@ -230,7 +237,10 @@ class GroupModel {
     return false;
   }
 
-  Future<bool> _getPeers(List<Peer> tmpPeers) async {
+  Future<bool> _getPeers(
+    List<Peer> tmpPeers, {
+    required Map<String, String> deviceGroupNamesById,
+  }) async {
     try {
       var uri0 = Uri.parse(await bind.mainGetApiServer());
       final pageSize = 100;
@@ -273,7 +283,10 @@ class GroupModel {
             if (data is List) {
               for (final p in data) {
                 final peerData = request.usesAdminToken && p is Map
-                    ? normalizeAdminPeerPayload(Map<String, dynamic>.from(p))
+                    ? normalizeAdminPeerPayload(
+                        Map<String, dynamic>.from(p),
+                        deviceGroupNamesById: deviceGroupNamesById,
+                      )
                     : p;
                 final peerPayload = PeerPayload.fromJson(peerData);
                 final peer = PeerPayload.toPeer(peerPayload);
