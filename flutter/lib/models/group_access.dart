@@ -3,8 +3,13 @@ enum GroupApiResource { deviceGroups, users, deviceList }
 class GroupApiRequest {
   final String path;
   final Map<String, String> queryParameters;
+  final bool usesAdminToken;
 
-  const GroupApiRequest(this.path, this.queryParameters);
+  const GroupApiRequest(
+    this.path,
+    this.queryParameters, {
+    this.usesAdminToken = false,
+  });
 }
 
 GroupApiRequest buildGroupApiRequest({
@@ -20,10 +25,17 @@ GroupApiRequest buildGroupApiRequest({
 
   switch (resource) {
     case GroupApiResource.deviceGroups:
-      return GroupApiRequest(
-        isAdmin ? '/api/device-groups' : '/api/device-group/accessible',
-        queryParameters,
-      );
+      if (isAdmin) {
+        return GroupApiRequest(
+          '/api/admin/device_group/list',
+          {
+            'page': current.toString(),
+            'page_size': pageSize.toString(),
+          },
+          usesAdminToken: true,
+        );
+      }
+      return GroupApiRequest('/api/device-group/accessible', queryParameters);
     case GroupApiResource.users:
       if (!isAdmin) {
         queryParameters['accessible'] = '';
@@ -32,12 +44,93 @@ GroupApiRequest buildGroupApiRequest({
       return GroupApiRequest('/api/users', queryParameters);
     case GroupApiResource.deviceList:
       if (isAdmin) {
-        return GroupApiRequest('/api/devices', queryParameters);
+        return GroupApiRequest(
+          '/api/admin/peer/list',
+          {
+            'page': current.toString(),
+            'page_size': pageSize.toString(),
+            'id': '',
+            'hostname': '',
+            'username': '',
+            'ip': '',
+          },
+          usesAdminToken: true,
+        );
       }
       queryParameters['accessible'] = '';
       queryParameters['status'] = '1';
       return GroupApiRequest('/api/peers', queryParameters);
   }
+}
+
+Map<String, String> buildGroupApiHeaders(
+    String accessToken, GroupApiRequest request) {
+  if (request.usesAdminToken) {
+    return {'api-token': accessToken};
+  }
+  return {'Authorization': 'Bearer $accessToken'};
+}
+
+Map<String, dynamic> normalizeGroupApiResponse(
+    Map<String, dynamic> json, {
+    required bool adminEndpoint,
+  }) {
+  if (!adminEndpoint) {
+    return json;
+  }
+
+  final payload = json['data'];
+  if (payload is! Map) {
+    return json;
+  }
+
+  return <String, dynamic>{
+    ...json,
+    'total': payload['total'] ?? 0,
+    'data': payload['list'] is List ? payload['list'] : <dynamic>[],
+  };
+}
+
+String _normalizeAdminPeerOs(dynamic value) {
+  final os = value?.toString() ?? '';
+  final lowerOs = os.toLowerCase();
+  if (lowerOs.contains('windows')) {
+    return 'Windows';
+  }
+  if (lowerOs.contains('mac')) {
+    return 'macOS';
+  }
+  if (lowerOs.contains('android')) {
+    return 'Android';
+  }
+  if (lowerOs.contains('linux')) {
+    return 'Linux';
+  }
+  return os;
+}
+
+Map<String, dynamic> normalizeAdminPeerPayload(Map<String, dynamic> peer) {
+  var userName = '';
+  final user = peer['user'];
+  if (user is Map) {
+    userName = (user['name'] ?? user['username'] ?? '').toString();
+  }
+  if (userName.isEmpty) {
+    userName = (peer['user_name'] ?? '').toString();
+  }
+
+  return <String, dynamic>{
+    'id': peer['id'] ?? '',
+    'info': <String, dynamic>{
+      'device_name': peer['hostname'] ?? '',
+      'os': _normalizeAdminPeerOs(peer['os']),
+      'username': peer['username'] ?? '',
+    },
+    'user_name': userName,
+    'device_group_name':
+        peer['device_group_name'] ?? peer['group_name'] ?? '',
+    'note': peer['alias'] ?? '',
+  };
 }
 
 Uri buildGroupApiUri(Uri baseUri, GroupApiRequest request) {

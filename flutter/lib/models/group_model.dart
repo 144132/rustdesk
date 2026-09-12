@@ -117,10 +117,20 @@ class GroupModel {
           pageSize: pageSize,
         );
         var uri = buildGroupApiUri(uri0, request);
-        final resp = await http.get(uri, headers: getHttpHeaders());
+        final resp = await http.get(
+          uri,
+          headers: buildGroupApiHeaders(
+            bind.mainGetLocalOption(key: 'access_token'),
+            request,
+          ),
+        );
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
             _jsonDecodeResp(decode_http_response(resp), resp.statusCode);
+        json = normalizeGroupApiResponse(
+          json,
+          adminEndpoint: request.usesAdminToken,
+        );
         if (json.containsKey('error')) {
           throw json['error'];
         }
@@ -170,7 +180,13 @@ class GroupModel {
           pageSize: pageSize,
         );
         var uri = buildGroupApiUri(uri0, request);
-        final resp = await http.get(uri, headers: getHttpHeaders());
+        final resp = await http.get(
+          uri,
+          headers: buildGroupApiHeaders(
+            bind.mainGetLocalOption(key: 'access_token'),
+            request,
+          ),
+        );
         _statusCode = resp.statusCode;
         Map<String, dynamic> json =
             _jsonDecodeResp(decode_http_response(resp), resp.statusCode);
@@ -229,11 +245,21 @@ class GroupModel {
           pageSize: pageSize,
         );
         var uri = buildGroupApiUri(uri0, request);
-        final resp = await http.get(uri, headers: getHttpHeaders());
+        final resp = await http.get(
+          uri,
+          headers: buildGroupApiHeaders(
+            bind.mainGetLocalOption(key: 'access_token'),
+            request,
+          ),
+        );
         _statusCode = resp.statusCode;
 
         Map<String, dynamic> json =
             _jsonDecodeResp(decode_http_response(resp), resp.statusCode);
+        json = normalizeGroupApiResponse(
+          json,
+          adminEndpoint: request.usesAdminToken,
+        );
         if (json.containsKey('error')) {
           throw json['error'];
         }
@@ -246,7 +272,10 @@ class GroupModel {
             final data = json['data'];
             if (data is List) {
               for (final p in data) {
-                final peerPayload = PeerPayload.fromJson(p);
+                final peerData = request.usesAdminToken && p is Map
+                    ? normalizeAdminPeerPayload(Map<String, dynamic>.from(p))
+                    : p;
+                final peerPayload = PeerPayload.fromJson(peerData);
                 final peer = PeerPayload.toPeer(peerPayload);
                 int index = tmpPeers.indexWhere((e) => e.id == peer.id);
                 if (index < 0) {
