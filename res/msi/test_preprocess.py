@@ -2,12 +2,15 @@
 # -*- coding: utf-8 -*-
 
 import importlib.util
+import re
 import sys
 from pathlib import Path
 
 
 MSI_DIR = Path(__file__).resolve().parent
 WORKFLOW = MSI_DIR.parent.parent / ".github" / "workflows" / "flutter-build.yml"
+CARGO_TOML = MSI_DIR.parent.parent / "Cargo.toml"
+CARGO_LOCK = MSI_DIR.parent.parent / "Cargo.lock"
 
 
 def load_preprocess():
@@ -76,3 +79,27 @@ def test_workflow_passes_separate_display_names_for_package_and_template():
 
     assert 'python preprocess.py --arp -d ../../rustdesk --display-name "新育智慧校园远程协助"' in workflow
     assert "python preprocess.py --arp --template --revision-version 0 -d ../../rustdesk-msi-template --app-name RDAPPNAM --display-name RDAPPNAM" in workflow
+
+
+def test_release_version_is_cargo_compatible_and_consistent_across_build_inputs():
+    cargo = CARGO_TOML.read_text(encoding="utf-8")
+    lock = CARGO_LOCK.read_text(encoding="utf-8")
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    cargo_version = re.search(r'^version\s*=\s*"([^"]+)"', cargo, re.MULTILINE).group(1)
+    lock_version = re.search(
+        r'name = "rustdesk"\s+version = "([^"]+)"', lock, re.MULTILINE
+    ).group(1)
+    workflow_version = re.search(r'^  VERSION:\s*"([^"]+)"', workflow, re.MULTILINE).group(1)
+
+    assert re.fullmatch(r"\d+\.\d+\.\d+-\d+", cargo_version)
+    assert lock_version == cargo_version
+    assert workflow_version == cargo_version
+
+
+def test_android_release_builds_use_a_new_version_name_and_version_code():
+    workflow = WORKFLOW.read_text(encoding="utf-8")
+
+    assert 'ANDROID_BUILD_NUMBER: "20260912"' in workflow
+    assert workflow.count('--build-name "${{ env.VERSION }}"') == 5
+    assert workflow.count('--build-number "${{ env.ANDROID_BUILD_NUMBER }}"') == 5
