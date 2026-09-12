@@ -112,4 +112,9 @@ def test_android_release_builds_use_a_new_version_name_and_version_code():
 def test_msi_normalizes_cargo_prerelease_version_to_dotted_version():
     preprocess = load_preprocess()
 
-    assert preprocess.normalize_msi_version("1.5.1-202609121358") == "1.5.1.202609121358"
+    normalized = preprocess.normalize_msi_version("1.5.1-202609121358")
+
+    assert normalized == "1.5.9770.838"
+    assert all(int(component) <= 65534 for component in normalized.split("."))
+    assert tuple(map(int, preprocess.normalize_msi_version("1.5.1-202609121359").split("."))) > tuple(map(int, normalized.split(".")))
+    assert tuple(map(int, preprocess.normalize_msi_version("1.5.1-202609131000").split("."))) > tuple(map(int, normalized.split(".")))

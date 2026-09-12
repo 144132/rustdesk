@@ -46,8 +46,34 @@ def default_revision_version():
 
 
 def normalize_msi_version(version):
-    """Convert Cargo prerelease separators to MSI's dotted version form."""
-    return version.replace("-", ".")
+    """Convert Cargo's timestamp prerelease into a valid, ordered MSI version.
+
+    MSI/WiX numeric version components are limited to 65534, so a raw Cargo
+    version such as ``1.5.1-202609121358`` cannot become
+    ``1.5.1.202609121358``. Encode the date as days since 2000 in the build
+    component and the HHMM time as minutes since midnight in the revision
+    component. This keeps same-day and next-day releases ordered while keeping
+    every MSI component within its allowed range.
+    """
+    match = re.fullmatch(r"(\d+)\.(\d+)\.(\d+)-(\d{8})(\d{4})?", version)
+    if not match:
+        return version.replace("-", ".")
+
+    major, minor, _patch, date_text, time_text = match.groups()
+    release_date = datetime.datetime.strptime(date_text, "%Y%m%d").date()
+    date_code = (release_date.year - 2000) * 366 + release_date.timetuple().tm_yday - 1
+    if not 0 <= date_code <= 65534:
+        raise ValueError(f"release date is outside MSI version range: {date_text}")
+
+    time_code = 0
+    if time_text:
+        hour = int(time_text[:2])
+        minute = int(time_text[2:])
+        if hour > 23 or minute > 59:
+            raise ValueError(f"release time is invalid: {time_text}")
+        time_code = hour * 60 + minute
+
+    return f"{major}.{minor}.{date_code}.{time_code}"
 
 
 def make_parser():
