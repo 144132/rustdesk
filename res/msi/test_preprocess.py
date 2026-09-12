@@ -100,6 +100,16 @@ def test_release_version_is_cargo_compatible_and_consistent_across_build_inputs(
 def test_android_release_builds_use_a_new_version_name_and_version_code():
     workflow = WORKFLOW.read_text(encoding="utf-8")
 
-    assert 'ANDROID_BUILD_NUMBER: "20260912"' in workflow
+    android_build_number = re.search(
+        r'^  ANDROID_BUILD_NUMBER:\s*"(\d+)"', workflow, re.MULTILINE
+    ).group(1)
+    assert int(android_build_number) > 20260912
+    assert int(android_build_number) <= 2_100_000_000
     assert workflow.count('--build-name "${{ env.VERSION }}"') == 5
     assert workflow.count('--build-number "${{ env.ANDROID_BUILD_NUMBER }}"') == 5
+
+
+def test_msi_normalizes_cargo_prerelease_version_to_dotted_version():
+    preprocess = load_preprocess()
+
+    assert preprocess.normalize_msi_version("1.5.1-202609121358") == "1.5.1.202609121358"

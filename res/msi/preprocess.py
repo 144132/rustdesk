@@ -44,6 +44,12 @@ g_arpsystemcomponent = {
 def default_revision_version():
     return int(datetime.datetime.now().timestamp() / 60)
 
+
+def normalize_msi_version(version):
+    """Convert Cargo prerelease separators to MSI's dotted version form."""
+    return version.replace("-", ".")
+
+
 def make_parser():
     parser = argparse.ArgumentParser(description="Msi preprocess script.")
     parser.add_argument(
@@ -513,9 +519,9 @@ def init_global_vars(dist_dir, app_name, args):
 
     global g_version
     global g_build_date
-    g_version = args.version.replace("-", ".")
+    g_version = normalize_msi_version(args.version)
     if g_version == "":
-        g_version = read_process_output("--version")
+        g_version = normalize_msi_version(read_process_output("--version"))
     version_pattern = re.compile(r"\d+\.\d+\.\d+.*")
     if not version_pattern.match(g_version):
         print(f"Error: version {g_version} not found in {dist_app}")
