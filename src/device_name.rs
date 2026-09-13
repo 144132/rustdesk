@@ -1,4 +1,4 @@
-#[cfg(windows)]
+#[cfg(any(windows, target_os = "android", target_os = "ios"))]
 use hbb_common::config::{keys, Config};
 
 pub(crate) fn format_device_name(custom_name: &str, hostname: &str) -> String {
@@ -22,7 +22,10 @@ pub(crate) fn remote_device_name() -> String {
     }
 
     #[cfg(any(target_os = "android", target_os = "ios"))]
-    return crate::common::hostname();
+    {
+        let custom_name = Config::get_option(keys::OPTION_PRESET_DEVICE_NAME);
+        return format_device_name(&custom_name, &crate::common::hostname());
+    }
 
     #[cfg(all(
         not(windows),

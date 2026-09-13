@@ -17,6 +17,7 @@ import '../../common/widgets/login.dart';
 import '../../consts.dart';
 import '../../models/model.dart';
 import '../../models/platform_model.dart';
+import '../android_startup.dart';
 import '../widgets/deploy_dialog.dart';
 import '../widgets/dialog.dart';
 import 'home_page.dart';
@@ -421,6 +422,34 @@ class _SettingsState extends State<SettingsPage> with WidgetsBindingObserver {
             })
     ];
     final List<AbstractSettingsTile> shareScreenTiles = [
+      if (isAndroid && !bind.isOutgoingOnly())
+        SettingsTile(
+          leading: const Icon(Icons.badge),
+          title: Builder(
+            builder: (context) {
+              final name = bind
+                  .mainGetOptionSync(key: kOptionPresetDeviceName)
+                  .trim();
+              return Column(
+                crossAxisAlignment: CrossAxisAlignment.start,
+                children: [
+                  const Text('设备名称'),
+                  Text(
+                    name.isEmpty ? '未设置' : name,
+                    style: Theme.of(context).textTheme.bodySmall,
+                  ),
+                ],
+              );
+            },
+          ),
+          trailing: const Icon(Icons.arrow_forward_ios),
+          onPressed: (context) async {
+            await editAndroidDeviceName(context);
+            if (mounted) {
+              setState(() {});
+            }
+          },
+        ),
       SettingsTile.switchTile(
         title: Text(translate('Deny LAN discovery')),
         initialValue: _denyLANDiscovery,

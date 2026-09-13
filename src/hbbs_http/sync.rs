@@ -139,7 +139,7 @@ async fn start_hbbs_sync_async() {
                 let mut v = crate::get_sysinfo();
                 let device_name = Config::get_option(keys::OPTION_PRESET_DEVICE_NAME);
                 if !device_name.is_empty() {
-                    #[cfg(windows)]
+                    #[cfg(any(windows, target_os = "android", target_os = "ios"))]
                     let device_name = crate::device_name::remote_device_name();
                     v["hostname"] = json!(device_name);
                 }
