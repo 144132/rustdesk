@@ -4,6 +4,7 @@ import 'package:flutter/material.dart';
 
 import '../../common.dart';
 import '../../consts.dart';
+import '../../models/platform_model.dart';
 import 'android_startup_policy.dart';
 
 Future<String?> showAndroidDeviceNameDialog(
