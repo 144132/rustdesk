@@ -9,17 +9,17 @@ import 'android_startup_policy.dart';
 Future<String?> showAndroidDeviceNameDialog(
   BuildContext context, {
   String initialName = '',
-  bool required = false,
+  bool isRequired = false,
 }) {
   final controller = TextEditingController(text: initialName);
   final future = showDialog<String>(
     context: context,
-    barrierDismissible: !required,
+    barrierDismissible: !isRequired,
     builder: (dialogContext) => StatefulBuilder(
       builder: (context, setState) {
         final valid = isValidAndroidDeviceName(controller.text);
         return AlertDialog(
-          title: Text(required ? '设置设备名称' : '修改设备名称'),
+          title: Text(isRequired ? '设置设备名称' : '修改设备名称'),
           content: TextField(
             controller: controller,
             autofocus: true,
@@ -32,7 +32,7 @@ Future<String?> showAndroidDeviceNameDialog(
             onChanged: (_) => setState(() {}),
           ),
           actions: [
-            if (!required)
+            if (!isRequired)
               TextButton(
                 onPressed: () => Navigator.of(dialogContext).pop(),
                 child: const Text('取消'),
@@ -75,7 +75,7 @@ Future<void> runAndroidStartupFlow(BuildContext context) async {
   if (shouldRequestInitialAndroidDeviceName(currentName)) {
     final value = await showAndroidDeviceNameDialog(
       context,
-      required: true,
+      isRequired: true,
     );
     if (value == null || !context.mounted) {
       return;
