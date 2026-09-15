@@ -13,6 +13,8 @@ param(
 
 $ErrorActionPreference = "Stop"
 
+# The platform.pk8 and platform.x509.pem pair is used for Android system signing.
+
 function Resolve-FilePath {
     param([string]$Path, [string]$Description)
 
