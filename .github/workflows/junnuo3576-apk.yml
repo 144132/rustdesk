@@ -192,7 +192,7 @@ jobs:
           BUILD_VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           test -n "${BUILD_VERSION}"
           echo "VERSION=${BUILD_VERSION}" >> "${GITHUB_ENV}"
-          echo "ANDROID_BUILD_NUMBER=$(date -u +%y%m%d%H%M)" >> "${GITHUB_ENV}"
+          echo "ANDROID_BUILD_NUMBER=$(date -u +%Y%m%d%H)" >> "${GITHUB_ENV}"
 
       - name: Install Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
@@ -309,7 +309,7 @@ jobs:
           BUILD_VERSION="$(sed -n 's/^version = "\([^"]*\)".*/\1/p' Cargo.toml | head -n 1)"
           test -n "${BUILD_VERSION}"
           echo "VERSION=${BUILD_VERSION}" >> "${GITHUB_ENV}"
-          echo "ANDROID_BUILD_NUMBER=$(date -u +%y%m%d%H%M)" >> "${GITHUB_ENV}"
+          echo "ANDROID_BUILD_NUMBER=$(date -u +%Y%m%d%H)" >> "${GITHUB_ENV}"
 
       - name: Install Flutter
         uses: subosito/flutter-action@1a449444c387b1966244ae4d4f8c696479add0b2 # v2
