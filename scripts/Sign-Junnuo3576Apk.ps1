@@ -59,6 +59,27 @@ if (-not $apksigner) {
     throw "Android SDK apksigner.bat was not found. Set ANDROID_SDK_ROOT or install Android build-tools."
 }
 
+$javaHomes = @()
+if ($env:JAVA_HOME) { $javaHomes += $env:JAVA_HOME }
+if ($env:ANDROID_STUDIO_JAVA_HOME) { $javaHomes += $env:ANDROID_STUDIO_JAVA_HOME }
+if ($env:ProgramFiles) {
+    $javaHomes += (Join-Path $env:ProgramFiles "Android\Android Studio\jbr")
+    $javaHomes += Get-ChildItem -LiteralPath (Join-Path $env:ProgramFiles "Java") `
+        -Directory -ErrorAction SilentlyContinue | ForEach-Object { $_.FullName }
+}
+
+$javaHome = $null
+foreach ($candidate in ($javaHomes | Select-Object -Unique)) {
+    if (Test-Path -LiteralPath (Join-Path $candidate "bin\java.exe") -PathType Leaf) {
+        $javaHome = $candidate
+        break
+    }
+}
+if (-not $javaHome) {
+    throw "A usable Java runtime was not found for apksigner. Set JAVA_HOME to JDK 11 or newer."
+}
+$env:JAVA_HOME = $javaHome
+
 $tempRoot = Join-Path ([System.IO.Path]::GetTempPath()) ("junnuo3576-sign-" + [guid]::NewGuid().ToString("N"))
 New-Item -ItemType Directory -Path $tempRoot | Out-Null
 
