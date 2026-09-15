@@ -12,6 +12,7 @@ on:
       - "libs/hbb_common/**"
       - "flutter/**"
       - "res/**"
+      - "scripts/**"
       - ".github/workflows/junnuo3576-apk.yml"
 
 permissions:
