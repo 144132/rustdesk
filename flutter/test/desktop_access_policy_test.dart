@@ -66,6 +66,19 @@ void main() {
     });
   });
 
+  group('home version info', () {
+    test('formats the runtime version for the home status row', () {
+      expect(
+        homeVersionLabel(' 1.5.1-202609131749 '),
+        '版本号：1.5.1-202609131749',
+      );
+    });
+
+    test('returns no label when the runtime version is empty', () {
+      expect(homeVersionLabel('   '), isEmpty);
+    });
+  });
+
   group('Windows uninstall password', () {
     test('accepts the configured password only', () {
       expect(isValidWindowsUninstallPassword('xinyu'), isTrue);

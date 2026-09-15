@@ -6,6 +6,11 @@ String homeDeviceNameLabel(String name) {
   return value.isEmpty ? '未设置' : value;
 }
 
+String homeVersionLabel(String version) {
+  final value = version.trim();
+  return value.isEmpty ? '' : '版本号：$value';
+}
+
 bool isValidWindowsDeviceName(String name) {
   final value = name.trim();
   return value.isNotEmpty && value.length <= kWindowsDeviceNameMaxLength;

@@ -7,6 +7,7 @@ import 'dart:math';
 import 'package:flutter/material.dart';
 import 'package:flutter_hbb/common/widgets/connection_page_title.dart';
 import 'package:flutter_hbb/consts.dart';
+import 'package:flutter_hbb/desktop/desktop_access_policy.dart';
 import 'package:flutter_hbb/desktop/widgets/popup_menu.dart';
 import 'package:flutter_hbb/models/state_model.dart';
 import 'package:get/get.dart';
@@ -33,6 +34,7 @@ class OnlineStatusWidget extends StatefulWidget {
 /// State for the connection page.
 class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   final _svcStopped = Get.find<RxBool>(tag: 'stop-service');
+  late final Future<String> _versionFuture;
   Timer? _updateTimer;
 
   double get em => 14.0;
@@ -41,6 +43,7 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   @override
   void initState() {
     super.initState();
+    _versionFuture = bind.mainGetVersion();
     _updateTimer = periodic_immediate(Duration(seconds: 1), () async {
       updateStatus();
     });
@@ -55,6 +58,23 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
   @override
   Widget build(BuildContext context) {
     final isIncomingOnly = bind.isIncomingOnly();
+    versionWidget() => FutureBuilder<String>(
+          future: _versionFuture,
+          builder: (_, snapshot) {
+            final label = homeVersionLabel(snapshot.data ?? '');
+            if (label.isEmpty) {
+              return const SizedBox.shrink();
+            }
+            return Flexible(
+              child: Text(
+                label,
+                maxLines: 1,
+                overflow: TextOverflow.ellipsis,
+                style: TextStyle(fontSize: em),
+              ).marginOnly(left: em),
+            );
+          },
+        );
     startServiceWidget() => Offstage(
           offstage: !_svcStopped.value,
           child: InkWell(
@@ -87,6 +107,7 @@ class _OnlineStatusWidgetState extends State<OnlineStatusWidget> {
               width: isIncomingOnly ? 226 : null,
               child: _buildConnStatusMsg(),
             ),
+            if (isWindows && !isIncomingOnly) versionWidget(),
             // stop
             if (!isIncomingOnly) startServiceWidget(),
           ],
