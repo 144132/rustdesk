@@ -429,6 +429,14 @@ fn drm_can_serve_login_screen() -> bool {
     false
 }
 
+fn permission_info(permission: Permission, enabled: bool) -> PermissionInfo {
+    PermissionInfo {
+        permission: permission.into(),
+        enabled,
+        ..Default::default()
+    }
+}
+
 impl Connection {
     pub async fn start(
         addr: SocketAddr,
@@ -1289,11 +1297,7 @@ impl Connection {
 
     async fn send_permission(&mut self, permission: Permission, enabled: bool) {
         let mut misc = Misc::new();
-        misc.set_permission_info(PermissionInfo {
-            permission: permission.into(),
-            enabled,
-            ..Default::default()
-        });
+        misc.set_permission_info(permission_info(permission, enabled));
         let mut msg_out = Message::new();
         msg_out.set_misc(misc);
         self.send(msg_out).await;
@@ -1981,6 +1985,8 @@ impl Connection {
             ..Default::default()
         })
         .into();
+        self.send_permission(Permission::SoftwareInstall, software_install)
+            .await;
 
         let mut sub_service = false;
         #[allow(unused_mut)]
@@ -7781,6 +7787,15 @@ mod test {
                 expected
             );
         }
+    }
+
+    #[test]
+    fn software_install_permission_info_has_a_wire_permission_variant() {
+        use hbb_common::protobuf::Enum;
+
+        let info = permission_info(Permission::SoftwareInstall, true);
+        assert_eq!(info.permission.enum_value(), Ok(Permission::SoftwareInstall));
+        assert!(info.enabled);
     }
 
     #[test]

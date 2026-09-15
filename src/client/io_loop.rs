@@ -58,6 +58,26 @@ use std::{
     },
 };
 
+fn permission_name_for_ui(permission: Permission) -> Option<&'static str> {
+    match permission {
+        Permission::SoftwareInstall => Some("software_install"),
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod software_install_permission_tests {
+    use super::{permission_name_for_ui, Permission};
+
+    #[test]
+    fn software_install_permission_maps_to_flutter_key() {
+        assert_eq!(
+            permission_name_for_ui(Permission::SoftwareInstall),
+            Some("software_install")
+        );
+    }
+}
+
 pub struct Remote<T: InvokeUiSession> {
     handler: Session<T>,
     audio_sender: MediaSender,
@@ -1871,6 +1891,13 @@ impl<T: InvokeUiSession> Remote<T> {
                             }
                             Ok(Permission::PrivacyMode) => {
                                 self.handler.set_permission("privacy_mode", p.enabled);
+                            }
+                            Ok(Permission::SoftwareInstall) => {
+                                if let Some(name) =
+                                    permission_name_for_ui(Permission::SoftwareInstall)
+                                {
+                                    self.handler.set_permission(name, p.enabled);
+                                }
                             }
                             _ => {}
                         }
