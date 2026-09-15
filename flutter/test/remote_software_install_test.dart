@@ -166,7 +166,7 @@ void main() {
     expect(form.toJson().keys, isNot(contains('detection_value')));
   });
 
-  test('exposes the agreed enum values and gates visibility by both inputs', () {
+  test('exposes the agreed enum values and gates availability by both inputs', () {
     expect(InstallerType.values, <InstallerType>[InstallerType.msi, InstallerType.exe]);
     expect(DetectionType.values, <DetectionType>[
       DetectionType.msiProductCode,
@@ -180,6 +180,33 @@ void main() {
     expect(shouldShowRemoteSoftwareInstall(true, true), isTrue);
     expect(shouldShowRemoteSoftwareInstall(true, false), isFalse);
     expect(shouldShowRemoteSoftwareInstall(false, true), isFalse);
+  });
+
+  test('keeps the Windows remote install entry visible before capability checks', () {
+    expect(
+      shouldShowRemoteSoftwareInstallEntry(
+        localWindows: true,
+      ),
+      isTrue,
+    );
+    expect(shouldShowRemoteSoftwareInstallEntry(localWindows: false), isFalse);
+  });
+
+  test('explains why remote install is unavailable', () {
+    expect(
+      remoteSoftwareInstallUnavailableMessage(
+        capability: false,
+        permission: false,
+      ),
+      contains('对方设备'),
+    );
+    expect(
+      remoteSoftwareInstallUnavailableMessage(
+        capability: true,
+        permission: false,
+      ),
+      contains('权限'),
+    );
   });
 
   testWidgets('renders inputs and invokes submit and cancel callbacks', (tester) async {

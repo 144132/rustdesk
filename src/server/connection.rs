@@ -2552,22 +2552,33 @@ impl Connection {
         )
     }
 
+    fn software_install_permission(
+        control_permissions: &Option<ControlPermissions>,
+        local_policy_enabled: bool,
+    ) -> bool {
+        use hbb_common::rendezvous_proto::control_permissions::Permission;
+        control_permissions
+            .as_ref()
+            .and_then(|control_permissions| {
+                crate::get_control_permission(
+                    control_permissions.permissions,
+                    Permission::software_install,
+                )
+            })
+            .unwrap_or(local_policy_enabled)
+    }
+
     fn permission(
         enable_prefix_option: &str,
         control_permissions: &Option<ControlPermissions>,
     ) -> bool {
-        use hbb_common::rendezvous_proto::control_permissions::Permission;
         if enable_prefix_option == keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL {
-            return control_permissions
-                .as_ref()
-                .and_then(|control_permissions| {
-                    crate::get_control_permission(
-                        control_permissions.permissions,
-                        Permission::software_install,
-                    )
-                })
-                == Some(true);
+            return Self::software_install_permission(
+                control_permissions,
+                Self::is_permission_enabled_locally(enable_prefix_option),
+            );
         }
+        use hbb_common::rendezvous_proto::control_permissions::Permission;
         if let Some(control_permissions) = control_permissions {
             let permission = match enable_prefix_option {
                 keys::OPTION_ENABLE_KEYBOARD => Some(Permission::keyboard),
@@ -7738,7 +7749,7 @@ mod test {
     }
 
     #[test]
-    fn software_install_permission_requires_explicit_control_permission() {
+    fn software_install_permission_defaults_to_local_policy_and_honors_explicit_control_permission() {
         use hbb_common::{
             protobuf::Enum,
             rendezvous_proto::control_permissions::Permission,
@@ -7746,10 +7757,17 @@ mod test {
 
         let shift = Permission::software_install.value() * 2;
         let cases = [
-            (None, false),
+            (None, true, true),
+            (None, false, false),
+            (Some(ControlPermissions::new()), true, true),
+            (Some(ControlPermissions::new()), false, false),
             (
-                Some(ControlPermissions::new()),
-                false,
+                Some(ControlPermissions {
+                    permissions: 0b11 << shift,
+                    ..Default::default()
+                }),
+                true,
+                true,
             ),
             (
                 Some(ControlPermissions {
@@ -7757,12 +7775,14 @@ mod test {
                     ..Default::default()
                 }),
                 false,
+                false,
             ),
             (
                 Some(ControlPermissions {
                     permissions: 0b01 << shift,
                     ..Default::default()
                 }),
+                true,
                 false,
             ),
             (
@@ -7770,20 +7790,17 @@ mod test {
                     permissions: 0b10 << shift,
                     ..Default::default()
                 }),
+                false,
                 true,
             ),
         ];
 
-        for (control_permissions, expected) in cases {
+        for (control_permissions, local_policy_enabled, expected) in cases {
             assert_eq!(
-                Connection::permission(
-                    keys::OPTION_ALLOW_REMOTE_SOFTWARE_INSTALL,
-                    &control_permissions
+                Connection::software_install_permission(
+                    &control_permissions,
+                    local_policy_enabled,
                 ),
-                expected
-            );
-            assert_eq!(
-                software_install_capability(true, true, &control_permissions, true),
                 expected
             );
         }
@@ -7807,7 +7824,7 @@ mod test {
         assert!(software_install_capability(true, true, &enabled, true));
         assert!(!software_install_capability(false, true, &enabled, true));
         assert!(!software_install_capability(true, false, &enabled, true));
-        assert!(!software_install_capability(true, true, &None, true));
+        assert!(software_install_capability(true, true, &None, true));
         assert!(!software_install_capability(true, true, &enabled, false));
     }
 

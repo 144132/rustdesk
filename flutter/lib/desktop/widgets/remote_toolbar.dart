@@ -972,8 +972,12 @@ class _SoftwareInstallMenu extends StatelessWidget {
   });
 
   bool get _visible {
+    return shouldShowRemoteSoftwareInstallEntry(localWindows: localWindowsGate);
+  }
+
+  bool get _supported {
     final model = ffi.ffiModel;
-    return localWindowsGate &&
+    return _visible &&
         model.pi.platform == kPeerPlatformWindows &&
         shouldShowRemoteSoftwareInstall(
             model.pi.features.softwareInstall,
@@ -986,6 +990,7 @@ class _SoftwareInstallMenu extends StatelessWidget {
       animation: ffi.ffiModel,
       builder: (context, _) {
         if (!_visible) return const Offstage();
+        final supported = _supported;
         final busy = ffi.ffiModel.softwareInstallBusy;
         return _IconMenuButton(
           icon: Icon(
@@ -993,10 +998,20 @@ class _SoftwareInstallMenu extends StatelessWidget {
             color: Colors.white,
             size: _ToolbarTheme.buttonSize,
           ),
-          tooltip: busy ? '查看远程安装状态' : '远程安装',
+          tooltip: busy
+              ? '查看远程安装状态'
+              : supported
+                  ? '远程安装'
+                  : '远程安装（暂不可用）',
           onPressed: () => _open(context),
-          color: busy ? _ToolbarTheme.hoverBlueColor : _ToolbarTheme.blueColor,
-          hoverColor: _ToolbarTheme.hoverBlueColor,
+          color: busy
+              ? _ToolbarTheme.hoverBlueColor
+              : supported
+                  ? _ToolbarTheme.blueColor
+                  : _ToolbarTheme.inactiveColor,
+          hoverColor: supported
+              ? _ToolbarTheme.hoverBlueColor
+              : _ToolbarTheme.hoverInactiveColor,
         );
       },
     );
@@ -1004,6 +1019,10 @@ class _SoftwareInstallMenu extends StatelessWidget {
 
   Future<void> _open(BuildContext context) async {
     if (!_visible) return;
+    if (!_supported) {
+      await _showUnavailable(context);
+      return;
+    }
     if (ffi.ffiModel.softwareInstallBusy) {
       await _showStatus(context);
       return;
@@ -1021,7 +1040,7 @@ class _SoftwareInstallMenu extends StatelessWidget {
         onCancel: () => Navigator.of(dialogContext).pop(),
       ),
     );
-    if (submittedForm == null || !_visible) return;
+    if (submittedForm == null || !_supported) return;
 
     final requestId = Uuid().v4();
     final manifestJson = jsonEncode(
@@ -1037,6 +1056,28 @@ class _SoftwareInstallMenu extends StatelessWidget {
       ffi.ffiModel.markSoftwareInstallFailure(requestId, '发送失败：$error');
     }
     if (context.mounted) await _showStatus(context);
+  }
+
+  Future<void> _showUnavailable(BuildContext context) async {
+    final model = ffi.ffiModel;
+    await showDialog<void>(
+      context: context,
+      builder: (_) => AlertDialog(
+        title: const Text('远程安装不可用'),
+        content: Text(
+          remoteSoftwareInstallUnavailableMessage(
+            capability: model.pi.features.softwareInstall,
+            permission: model.permissions['software_install'] == true,
+          ),
+        ),
+        actions: [
+          TextButton(
+            onPressed: () => Navigator.of(context).pop(),
+            child: const Text('确定'),
+          ),
+        ],
+      ),
+    );
   }
 
   Future<void> _showStatus(BuildContext context) async {

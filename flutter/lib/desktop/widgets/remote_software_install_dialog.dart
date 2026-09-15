@@ -248,6 +248,24 @@ class RemoteSoftwareInstallForm {
 bool shouldShowRemoteSoftwareInstall(bool capability, bool permission) =>
     capability && permission;
 
+/// The entry is intentionally visible on Windows before peer capability data
+/// is evaluated, so unsupported peers can receive an actionable explanation.
+bool shouldShowRemoteSoftwareInstallEntry({required bool localWindows}) =>
+    localWindows;
+
+String remoteSoftwareInstallUnavailableMessage({
+  required bool capability,
+  required bool permission,
+}) {
+  if (!capability) {
+    return '对方设备暂不支持远程安装，请确认对方使用支持该功能的 Windows 版本、Windows 服务已安装并运行，然后重新连接。';
+  }
+  if (!permission) {
+    return '当前连接没有远程安装权限，请在对方设备开启远程安装权限后重新连接。';
+  }
+  return '远程安装暂不可用，请断开连接后重试。';
+}
+
 class RemoteSoftwareInstallDialog extends StatefulWidget {
   final RemoteSoftwareInstallForm? initialForm;
   final RemoteSoftwareInstallForm? form;
