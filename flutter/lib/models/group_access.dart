@@ -71,6 +71,83 @@ Map<String, String> buildGroupApiHeaders(
   return {'Authorization': 'Bearer $accessToken'};
 }
 
+String _adminPeerGroupName(
+  Map<String, dynamic> peer,
+  Map<String, String> deviceGroupNamesById,
+) {
+  final explicitGroupName =
+      (peer['device_group_name'] ?? peer['group_name'] ?? '').toString();
+  if (explicitGroupName.trim().isNotEmpty) {
+    return explicitGroupName;
+  }
+  final groupId = peer['group_id']?.toString() ?? '';
+  return deviceGroupNamesById[groupId] ?? '';
+}
+
+bool _adminPeerHasGroup(
+  Map<String, dynamic> peer,
+  Map<String, String> deviceGroupNamesById,
+) {
+  final rawGroupId = peer['group_id'];
+  final groupId = rawGroupId is num
+      ? rawGroupId.toInt()
+      : int.tryParse(rawGroupId?.toString() ?? '');
+  return (groupId != null && groupId > 0) ||
+      _adminPeerGroupName(peer, deviceGroupNamesById).trim().isNotEmpty;
+}
+
+int _adminPeerRecordOrder(Map<String, dynamic> peer) {
+  final rawRowId = peer['row_id'];
+  final rowId = rawRowId is num
+      ? rawRowId.toInt()
+      : int.tryParse(rawRowId?.toString() ?? '');
+  if (rowId != null) return rowId;
+
+  final rawLastOnline = peer['last_online_time'];
+  return rawLastOnline is num
+      ? rawLastOnline.toInt()
+      : int.tryParse(rawLastOnline?.toString() ?? '') ?? 0;
+}
+
+bool _shouldPreferAdminPeer(
+  Map<String, dynamic> candidate,
+  Map<String, dynamic> current, {
+  required Map<String, String> deviceGroupNamesById,
+}) {
+  final candidateHasGroup =
+      _adminPeerHasGroup(candidate, deviceGroupNamesById);
+  final currentHasGroup = _adminPeerHasGroup(current, deviceGroupNamesById);
+  if (candidateHasGroup != currentHasGroup) {
+    return candidateHasGroup;
+  }
+  return _adminPeerRecordOrder(candidate) >=
+      _adminPeerRecordOrder(current);
+}
+
+List<Map<String, dynamic>> mergeAdminPeerRecordsById(
+  Iterable<Map<String, dynamic>> records, {
+  Map<String, String> deviceGroupNamesById = const <String, String>{},
+}) {
+  // The admin endpoint returns peer records, while the client identifies a
+  // device by its RustDesk ID. Keep one canonical record per device ID;
+  // assigned-group rows win over ungrouped historical rows.
+  final peersById = <String, Map<String, dynamic>>{};
+  for (final record in records) {
+    final id = (record['id'] ?? '').toString().trim();
+    if (id.isEmpty) continue;
+    final current = peersById[id];
+    if (current == null ||
+        _shouldPreferAdminPeer(
+          record,
+          current,
+          deviceGroupNamesById: deviceGroupNamesById,
+        )) {
+      peersById[id] = record;
+    }
+  }
+  return peersById.values.toList();
+}
+
 Map<String, dynamic> normalizeGroupApiResponse(
     Map<String, dynamic> json, {
     required bool adminEndpoint,
@@ -121,12 +198,8 @@ Map<String, dynamic> normalizeAdminPeerPayload(
   if (userName.isEmpty) {
     userName = (peer['user_name'] ?? '').toString();
   }
-  final explicitGroupName =
-      (peer['device_group_name'] ?? peer['group_name'] ?? '').toString();
-  final groupId = peer['group_id']?.toString() ?? '';
-  final deviceGroupName = explicitGroupName.isNotEmpty
-      ? explicitGroupName
-      : deviceGroupNamesById[groupId] ?? '';
+  final deviceGroupName =
+      _adminPeerGroupName(peer, deviceGroupNamesById);
 
   return <String, dynamic>{
     'id': peer['id'] ?? '',

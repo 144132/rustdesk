@@ -210,6 +210,46 @@ void main() {
       expect(payload['note'], '办公室电脑');
     });
 
+    test('deduplicates admin peers globally by RustDesk ID', () {
+      final peers = mergeAdminPeerRecordsById([
+        {
+          'id': 'peer-1',
+          'row_id': 10,
+          'group_id': 6,
+          'hostname': '扶绥民族-旧记录',
+        },
+        {
+          'id': 'peer-1',
+          'row_id': 20,
+          'group_id': 0,
+          'hostname': '无分组历史记录',
+        },
+        {
+          'id': 'peer-1',
+          'row_id': 30,
+          'group_id': 6,
+          'hostname': '扶绥民族-新记录',
+        },
+        {
+          'id': 'peer-2',
+          'row_id': 40,
+          'group_id': 0,
+        },
+        {
+          'id': 'peer-2',
+          'row_id': 50,
+          'group_id': 0,
+          'hostname': '无分组新记录',
+        },
+      ], deviceGroupNamesById: {'6': '扶绥民族'});
+
+      expect(peers, hasLength(2));
+      expect(peers.firstWhere((p) => p['id'] == 'peer-1')['hostname'],
+          '扶绥民族-新记录');
+      expect(peers.firstWhere((p) => p['id'] == 'peer-2')['hostname'],
+          '无分组新记录');
+    });
+
     test('keeps the backend device group id in the group payload cache', () {
       final group = DeviceGroupPayload.fromJson({
         'id': 42,

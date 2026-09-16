@@ -246,11 +246,13 @@ class GroupModel {
       final pageSize = 100;
       var total = 0;
       int current = 0;
+      final isAdmin = gFFI.userModel.isAdmin.value;
+      final adminPeerRecords = <Map<String, dynamic>>[];
       do {
         current += 1;
         final request = buildGroupApiRequest(
           resource: GroupApiResource.deviceList,
-          isAdmin: gFFI.userModel.isAdmin.value,
+          isAdmin: isAdmin,
           current: current,
           pageSize: pageSize,
         );
@@ -282,12 +284,11 @@ class GroupModel {
             final data = json['data'];
             if (data is List) {
               for (final p in data) {
-                final peerData = request.usesAdminToken && p is Map
-                    ? normalizeAdminPeerPayload(
-                        Map<String, dynamic>.from(p),
-                        deviceGroupNamesById: deviceGroupNamesById,
-                      )
-                    : p;
+                if (isAdmin && p is Map) {
+                  adminPeerRecords.add(Map<String, dynamic>.from(p));
+                  continue;
+                }
+                final peerData = p;
                 final peerPayload = PeerPayload.fromJson(peerData);
                 final peer = PeerPayload.toPeer(peerPayload);
                 int index = tmpPeers.indexWhere((e) => e.id == peer.id);
@@ -301,6 +302,20 @@ class GroupModel {
           }
         }
       } while (current * pageSize < total);
+
+      if (isAdmin) {
+        final uniqueAdminPeers = mergeAdminPeerRecordsById(
+          adminPeerRecords,
+          deviceGroupNamesById: deviceGroupNamesById,
+        );
+        tmpPeers.addAll(uniqueAdminPeers.map((p) {
+          final peerData = normalizeAdminPeerPayload(
+            p,
+            deviceGroupNamesById: deviceGroupNamesById,
+          );
+          return PeerPayload.toPeer(PeerPayload.fromJson(peerData));
+        }));
+      }
       return true;
     } catch (err) {
       debugPrint('get accessible peers: $err');
