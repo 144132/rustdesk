@@ -37,17 +37,24 @@ class GroupModel {
         loadEvent: LoadEvent.group);
   }
 
-  Future<void> pull({force = true, quiet = false}) async {
-    if (bind.isDisableGroupPanel()) return;
-    if (!gFFI.userModel.isLogin || groupLoading.value) return;
-    if (gFFI.userModel.networkError.isNotEmpty) return;
-    if (!force && initialized) return;
+  Future<bool> pull({
+    bool force = true,
+    bool quiet = false,
+    int? preferredPeerRowId,
+  }) async {
+    if (bind.isDisableGroupPanel()) return false;
+    if (!gFFI.userModel.isLogin || groupLoading.value) return false;
+    if (gFFI.userModel.networkError.isNotEmpty) return false;
+    if (!force && initialized) return false;
     if (!quiet) {
       groupLoading.value = true;
       groupLoadError.value = "";
+    } else {
+      groupLoadError.value = "";
     }
+    var pulled = false;
     try {
-      await _pull();
+      pulled = await _pull(preferredPeerRowId: preferredPeerRowId);
       _tryHandlePullError();
     } catch (e) {
       print("pull accessibles error: $e");
@@ -60,9 +67,10 @@ class GroupModel {
     } else {
       _saveCache();
     }
+    return pulled && _statusCode != 401;
   }
 
-  Future<void> _pull() async {
+  Future<bool> _pull({int? preferredPeerRowId}) async {
     List<DeviceGroupPayload> tmpDeviceGroups = List.empty(growable: true);
     if (!await _getDeviceGroups(tmpDeviceGroups)) {
       // old hbbs doesn't support this api
@@ -75,14 +83,15 @@ class GroupModel {
     };
     List<UserPayload> tmpUsers = List.empty(growable: true);
     if (!await _getUsers(tmpUsers)) {
-      return;
+      return false;
     }
     List<Peer> tmpPeers = List.empty(growable: true);
     if (!await _getPeers(
       tmpPeers,
       deviceGroupNamesById: deviceGroupNamesById,
+      preferredRowId: preferredPeerRowId,
     )) {
-      return;
+      return false;
     }
     deviceGroups.value = tmpDeviceGroups;
     // me first
@@ -106,6 +115,7 @@ class GroupModel {
         .toList();
     groupLoadError.value = '';
     _callbackPeerUpdate();
+    return true;
   }
 
   Future<bool> _getDeviceGroups(
@@ -240,6 +250,7 @@ class GroupModel {
   Future<bool> _getPeers(
     List<Peer> tmpPeers, {
     required Map<String, String> deviceGroupNamesById,
+    int? preferredRowId,
   }) async {
     try {
       var uri0 = Uri.parse(await bind.mainGetApiServer());
@@ -307,6 +318,7 @@ class GroupModel {
         final uniqueAdminPeers = mergeAdminPeerRecordsById(
           adminPeerRecords,
           deviceGroupNamesById: deviceGroupNamesById,
+          preferredRowId: preferredRowId,
         );
         tmpPeers.addAll(uniqueAdminPeers.map((p) {
           final peerData = normalizeAdminPeerPayload(
@@ -323,6 +335,123 @@ class GroupModel {
           '${translate('pull_group_failed_tip')}: ${translate(err.toString())}';
     }
     return false;
+  }
+
+  Future<bool> updatePeerDeviceGroup(
+    Peer peer,
+    DeviceGroupPayload? targetGroup,
+  ) async {
+    if (!gFFI.userModel.isAdmin.value) {
+      throw const GroupApiMutationException(
+        message: 'No permission to edit device group',
+      );
+    }
+
+    final rowId = peer.serverRowId;
+    if (rowId == null || rowId <= 0) {
+      throw const GroupApiMutationException(
+        message: 'server_not_support',
+      );
+    }
+
+    final groupId = targetGroup == null ? 0 : int.tryParse(targetGroup.id);
+    if (groupId == null || groupId < 0) {
+      throw const GroupApiMutationException(
+        message: 'server_not_support',
+      );
+    }
+
+    final uri0 = Uri.parse(await bind.mainGetApiServer());
+    final request = buildGroupApiMutationRequest(
+      mutation: GroupApiMutation.updatePeerGroup,
+    );
+    final uri = buildGroupApiUri(uri0, request);
+    final headers = buildGroupApiHeaders(
+      bind.mainGetLocalOption(key: 'access_token'),
+      request,
+    );
+    headers['Content-Type'] = 'application/json';
+
+    final resp = await http.post(
+      uri,
+      headers: headers,
+      body: jsonEncode(buildAdminPeerGroupUpdatePayload(
+        rowId: rowId,
+        groupId: groupId,
+      )),
+    );
+    _statusCode = resp.statusCode;
+
+    Map<String, dynamic> response = <String, dynamic>{};
+    if (resp.body.trim().isNotEmpty) {
+      try {
+        final decoded = jsonDecode(decode_http_response(resp));
+        if (decoded is Map<String, dynamic>) {
+          response = decoded;
+        }
+      } catch (_) {
+        // The status code below still gives the user a useful error.
+      }
+    }
+
+    final message = _groupMutationResponseMessage(response, resp.statusCode);
+    if (resp.statusCode != 200 || response['error'] != null) {
+      throw GroupApiMutationException(
+        statusCode: resp.statusCode,
+        message: message,
+      );
+    }
+    final code = response['code'];
+    if (code is num && code != 0) {
+      throw GroupApiMutationException(
+        statusCode: resp.statusCode,
+        message: message,
+      );
+    }
+
+    final refreshed = await pull(
+      force: true,
+      quiet: true,
+      preferredPeerRowId: rowId,
+    );
+    if (!refreshed) {
+      final refreshError = groupLoadError.value.trim();
+      throw GroupApiMutationException(
+        statusCode: _statusCode,
+        message: refreshError.isNotEmpty
+            ? refreshError
+            : ((_statusCode == 401 || _statusCode == 403)
+                ? 'No permission to edit device group'
+                : 'HTTP $_statusCode'),
+      );
+    }
+    final updatedPeer = peers.firstWhere(
+      (item) => item.id == peer.id && item.serverRowId == rowId,
+      orElse: () => Peer.loading(),
+    );
+    final applied = updatedPeer.id == peer.id &&
+        (groupId == 0
+            ? (updatedPeer.deviceGroupId == null ||
+                    updatedPeer.deviceGroupId == 0) &&
+                updatedPeer.device_group_name.trim().isEmpty
+            : updatedPeer.deviceGroupId == groupId ||
+                updatedPeer.device_group_name == targetGroup?.name);
+    if (!applied) {
+      throw const GroupApiMutationException(
+        statusCode: 501,
+        message: 'server_not_support',
+      );
+    }
+    return true;
+  }
+
+  String _groupMutationResponseMessage(
+      Map<String, dynamic> response, int statusCode) {
+    final error = response['error'] ?? response['message'];
+    if (error != null && error.toString().trim().isNotEmpty) {
+      return error.toString();
+    }
+    return 'HTTP $statusCode';
   }
 
   Map<String, dynamic> _jsonDecodeResp(String body, int statusCode) {

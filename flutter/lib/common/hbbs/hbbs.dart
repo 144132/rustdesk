@@ -79,6 +79,8 @@ class PeerPayload {
   String id = '';
   Map<String, dynamic> info = {};
   int? status;
+  int? row_id;
+  int? group_id;
   String user = '';
   String user_name = '';
   String? device_group_name;
@@ -88,6 +90,8 @@ class PeerPayload {
       : id = json['id'] ?? '',
         info = (json['info'] is Map<String, dynamic>) ? json['info'] : {},
         status = json['status'],
+        row_id = _asInt(json['row_id']),
+        group_id = _asInt(json['group_id']),
         user = json['user'] ?? '',
         user_name = json['user_name'] ?? '',
         device_group_name = json['device_group_name'] ?? '',
@@ -96,6 +100,8 @@ class PeerPayload {
   static Peer toPeer(PeerPayload p) {
     return Peer.fromJson({
       "id": p.id,
+      'server_row_id': p.row_id,
+      'device_group_id': p.group_id,
       'loginName': p.user_name,
       "username": p.info['username'] ?? '',
       "platform": _platform(p.info['os']),
@@ -129,6 +135,12 @@ class PeerPayload {
         return null;
     }
   }
+}
+
+int? _asInt(dynamic value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '');
 }
 
 class LoginRequest {
@@ -293,7 +305,7 @@ class DeviceGroupPayload {
   DeviceGroupPayload(this.name, {this.id = ''});
 
   DeviceGroupPayload.fromJson(Map<String, dynamic> json)
-      : id = (json['id'] ?? json['row_id'])?.toString() ?? '',
+      : id = (json['id'] ?? json['row_id'] ?? json['guid'])?.toString() ?? '',
         name = json['name'] ?? '';
 
   Map<String, dynamic> toGroupCacheJson() {

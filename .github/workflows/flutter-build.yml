@@ -45,8 +45,8 @@ env:
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   VCPKG_CMAKE_VERSION: "4.3.0"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836" # 2025.01.13, got "/opt/artifacts/vcpkg/vcpkg: No such file or directory" with latest version
-  VERSION: "1.5.1-202609161816"
-  ANDROID_BUILD_NUMBER: "2026091618"
+  VERSION: "1.5.1-202609182243"
+  ANDROID_BUILD_NUMBER: "2026091822"
   NDK_VERSION: "r28c"
   #signing keys env variable checks
   ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
@@ -253,6 +253,10 @@ jobs:
         working-directory: flutter
         run: flutter test test/group_access_test.dart
 
+      - name: Run device group edit tests
+        working-directory: flutter
+        run: flutter test test/device_group_edit_test.dart
+
       - name: Analyze remote software Flutter files
         working-directory: flutter
         run: >-
@@ -261,6 +265,16 @@ jobs:
           lib/desktop/pages/remote_page.dart
           lib/desktop/widgets/remote_toolbar.dart
           lib/desktop/widgets/remote_software_install_dialog.dart
+
+      - name: Analyze device group Flutter files
+        working-directory: flutter
+        run: >-
+          flutter analyze --no-fatal-infos
+          lib/common/hbbs/hbbs.dart
+          lib/common/widgets/peer_card.dart
+          lib/models/group_access.dart
+          lib/models/group_model.dart
+          lib/models/peer_model.dart
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1

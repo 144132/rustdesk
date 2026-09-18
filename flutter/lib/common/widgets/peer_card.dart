@@ -9,7 +9,9 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
 import '../../common.dart';
+import '../../common/hbbs/hbbs.dart';
 import '../../common/formatter/id_formatter.dart';
+import '../../models/group_access.dart';
 import '../../models/peer_model.dart';
 import '../../models/platform_model.dart';
 import '../../desktop/widgets/material_mod_popup_menu.dart' as mod_menu;
@@ -948,6 +950,19 @@ abstract class BasePeerCard extends StatelessWidget {
   }
 
   @protected
+  MenuEntryBase<String> _editDeviceGroupAction(Peer peer) {
+    return MenuEntryButton<String>(
+      childBuilder: (TextStyle? style) => Text(
+        translate('Edit device group'),
+        style: style,
+      ),
+      proc: () => showEditDeviceGroupDialog(peer),
+      padding: menuPadding,
+      dismissOnClicked: true,
+    );
+  }
+
+  @protected
   Future<String> _getAlias(String id) async =>
       await bind.mainGetPeerOption(id: id, key: 'alias');
 
@@ -1337,6 +1352,10 @@ class MyGroupPeerCard extends BasePeerCard {
     //   menuItems.add(_unrememberPasswordAction(peer.id));
     // }
     if (gFFI.userModel.userName.isNotEmpty) {
+      if (gFFI.userModel.isAdmin.value) {
+        menuItems.add(MenuEntryDivider());
+        menuItems.add(_editDeviceGroupAction(peer));
+      }
       menuItems.add(_addToAb(peer));
     }
     return menuItems;
@@ -1345,6 +1364,107 @@ class MyGroupPeerCard extends BasePeerCard {
   @protected
   @override
   void _update() => gFFI.groupModel.pull();
+}
+
+const _noDeviceGroupId = '__no_device_group__';
+
+void showEditDeviceGroupDialog(Peer peer) {
+  final groups = gFFI.groupModel.deviceGroups
+      .where((group) => group.id.trim().isNotEmpty)
+      .toList(growable: false);
+  final currentGroupId = peer.deviceGroupId?.toString();
+  final selectedGroupId = (currentGroupId != null &&
+          groups.any((group) => group.id == currentGroupId))
+      ? currentGroupId
+      : _noDeviceGroupId;
+  final selected = selectedGroupId.obs;
+  final isInProgress = false.obs;
+
+  gFFI.dialogManager.show((setState, close, context) {
+    submit() async {
+      if (isInProgress.value) return;
+      isInProgress.value = true;
+      try {
+        final target = selected.value == _noDeviceGroupId
+            ? null
+            : groups.firstWhere((group) => group.id == selected.value);
+        await gFFI.groupModel.updatePeerDeviceGroup(peer, target);
+        close();
+        showToast(translate('Successful'));
+      } catch (error) {
+        if (error is GroupApiMutationException) {
+          if (error.isUnsupported) {
+            showToast(translate('server_not_support'));
+          } else if (error.isPermissionDenied) {
+            showToast(translate('No permission to edit device group'));
+          } else {
+            showToast(
+                '${translate('Device group update failed')}: ${error.message}');
+          }
+        } else {
+          showToast('${translate('Device group update failed')}: $error');
+        }
+      } finally {
+        isInProgress.value = false;
+      }
+    }
+
+    final items = <DropdownMenuItem<String>>[
+      DropdownMenuItem<String>(
+        value: _noDeviceGroupId,
+        child: Text(translate('Unassign device group')),
+      ),
+      ...groups.map((group) => DropdownMenuItem<String>(
+            value: group.id,
+            child: Text(group.name),
+          )),
+    ];
+
+    return CustomAlertDialog(
+      title: Row(
+        mainAxisAlignment: MainAxisAlignment.center,
+        children: [
+          Icon(Icons.edit_rounded, color: MyTheme.accent),
+          Text(translate('Edit device group')).paddingOnly(left: 10),
+        ],
+      ),
+      content: ConstrainedBox(
+        constraints: const BoxConstraints(minWidth: 360),
+        child: Column(
+          crossAxisAlignment: CrossAxisAlignment.start,
+          children: [
+            Obx(() => DropdownButtonFormField<String>(
+                  value: selected.value,
+                  isExpanded: true,
+                  decoration: InputDecoration(
+                    labelText: translate('Select device group'),
+                  ),
+                  items: items,
+                  onChanged: isInProgress.value
+                      ? null
+                      : (value) {
+                          if (value != null) selected.value = value;
+                        },
+                )),
+            Obx(() => isInProgress.value
+                ? const LinearProgressIndicator().marginOnly(top: 8)
+                : const SizedBox.shrink()),
+            if (groups.isEmpty)
+              Text(translate('No device groups available'))
+                  .marginOnly(top: 8),
+          ],
+        ),
+      ),
+      actions: [
+        Obx(() => dialogButton('Cancel',
+            onPressed: isInProgress.value ? null : close, isOutline: true)),
+        Obx(() => dialogButton('OK',
+            onPressed: isInProgress.value ? null : submit)),
+      ],
+      onSubmit: submit,
+      onCancel: close,
+    );
+  });
 }
 
 void _rdpDialog(String id) async {

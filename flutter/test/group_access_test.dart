@@ -250,6 +250,27 @@ void main() {
           '无分组新记录');
     });
 
+    test('prefers the updated row when verifying a group mutation', () {
+      final peers = mergeAdminPeerRecordsById([
+        {
+          'id': 'peer-1',
+          'row_id': 10,
+          'group_id': 6,
+          'hostname': '旧分组记录',
+        },
+        {
+          'id': 'peer-1',
+          'row_id': 20,
+          'group_id': 0,
+          'hostname': '取消分组后的记录',
+        },
+      ], preferredRowId: 20, deviceGroupNamesById: {'6': '扶绥民族'});
+
+      expect(peers, hasLength(1));
+      expect(peers.single['row_id'], 20);
+      expect(peers.single['group_id'], 0);
+    });
+
     test('keeps the backend device group id in the group payload cache', () {
       final group = DeviceGroupPayload.fromJson({
         'id': 42,
@@ -281,6 +302,17 @@ void main() {
       expect(isGroupCacheForRole({'is_admin': false}, true), isFalse);
       expect(isGroupCacheForRole({'is_admin': false}, false), isTrue);
       expect(isGroupCacheForRole({}, false), isFalse);
+    });
+  });
+
+  group('device group mutation errors', () {
+    test('recognizes an admin error returned with HTTP 200', () {
+      final error = GroupApiMutationException(
+        statusCode: 200,
+        message: 'Admin required!',
+      );
+
+      expect(error.isPermissionDenied, isTrue);
     });
   });
 }

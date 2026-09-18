@@ -21,6 +21,8 @@ class Peer {
   String loginName; //login username
   String device_group_name;
   String note;
+  final int? serverRowId;
+  final int? deviceGroupId;
   bool? sameServer;
 
   String getId() {
@@ -45,6 +47,9 @@ class Peer {
         loginName = json['loginName'] ?? '',
         device_group_name = json['device_group_name'] ?? '',
         note = json['note'] is String ? json['note'] : '',
+        serverRowId = _peerInt(json['server_row_id'] ?? json['row_id']),
+        deviceGroupId =
+            _peerInt(json['device_group_id'] ?? json['group_id']),
         sameServer = json['same_server'];
 
   Map<String, dynamic> toJson() {
@@ -90,6 +95,8 @@ class Peer {
       "platform": platform,
       "login_name": loginName,
       "device_group_name": device_group_name,
+      "server_row_id": serverRowId,
+      "device_group_id": deviceGroupId,
     };
   }
 
@@ -108,6 +115,8 @@ class Peer {
     required this.loginName,
     required this.device_group_name,
     required this.note,
+    this.serverRowId,
+    this.deviceGroupId,
     this.sameServer,
   });
 
@@ -142,7 +151,9 @@ class Peer {
         rdpUsername == other.rdpUsername &&
         device_group_name == other.device_group_name &&
         loginName == other.loginName &&
-        note == other.note;
+        note == other.note &&
+        serverRowId == other.serverRowId &&
+        deviceGroupId == other.deviceGroupId;
   }
 
   factory Peer.copy(Peer other) {
@@ -161,10 +172,18 @@ class Peer {
         loginName: other.loginName,
         device_group_name: other.device_group_name,
         note: other.note,
+        serverRowId: other.serverRowId,
+        deviceGroupId: other.deviceGroupId,
         sameServer: other.sameServer);
     peer.online = other.online;
     return peer;
   }
+}
+
+int? _peerInt(dynamic value) {
+  if (value is int) return value;
+  if (value is num) return value.toInt();
+  return int.tryParse(value?.toString() ?? '');
 }
 
 enum UpdateEvent { online, load }
