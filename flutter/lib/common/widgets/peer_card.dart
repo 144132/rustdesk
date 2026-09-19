@@ -9,7 +9,6 @@ import 'package:get/get.dart';
 import 'package:provider/provider.dart';
 
 import '../../common.dart';
-import '../../common/hbbs/hbbs.dart';
 import '../../common/formatter/id_formatter.dart';
 import '../../models/group_access.dart';
 import '../../models/peer_model.dart';
