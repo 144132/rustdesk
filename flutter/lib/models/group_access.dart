@@ -1,5 +1,34 @@
 enum GroupApiResource { deviceGroups, users, deviceList }
 
+enum GroupApiMutation { updatePeerGroup }
+
+class GroupApiMutationException implements Exception {
+  final int? statusCode;
+  final String message;
+
+  const GroupApiMutationException({this.statusCode, required this.message});
+
+  bool get isUnsupported =>
+      statusCode == 404 ||
+      statusCode == 405 ||
+      statusCode == 501 ||
+      message == 'server_not_support';
+
+  bool get isPermissionDenied {
+    if (statusCode == 401 || statusCode == 403) return true;
+    final normalized = message.toLowerCase();
+    return normalized.contains('admin required') ||
+        normalized.contains('permission') ||
+        normalized.contains('forbidden') ||
+        normalized.contains('unauthorized') ||
+        normalized.contains('无权限') ||
+        normalized.contains('管理员');
+  }
+
+  @override
+  String toString() => message;
+}
+
 class GroupApiRequest {
   final String path;
   final Map<String, String> queryParameters;
@@ -109,6 +138,13 @@ int _adminPeerRecordOrder(Map<String, dynamic> peer) {
       : int.tryParse(rawLastOnline?.toString() ?? '') ?? 0;
 }
 
+int? _adminPeerRowId(Map<String, dynamic> peer) {
+  final rawRowId = peer['row_id'] ?? peer['rowId'];
+  return rawRowId is num
+      ? rawRowId.toInt()
+      : int.tryParse(rawRowId?.toString() ?? '');
+}
+
 bool _shouldPreferAdminPeer(
   Map<String, dynamic> candidate,
   Map<String, dynamic> current, {
@@ -127,6 +163,7 @@ bool _shouldPreferAdminPeer(
 List<Map<String, dynamic>> mergeAdminPeerRecordsById(
   Iterable<Map<String, dynamic>> records, {
   Map<String, String> deviceGroupNamesById = const <String, String>{},
+  int? preferredRowId,
 }) {
   // The admin endpoint returns peer records, while the client identifies a
   // device by its RustDesk ID. Keep one canonical record per device ID;
@@ -136,6 +173,15 @@ List<Map<String, dynamic>> mergeAdminPeerRecordsById(
     final id = (record['id'] ?? '').toString().trim();
     if (id.isEmpty) continue;
     final current = peersById[id];
+    if (preferredRowId != null && _adminPeerRowId(record) == preferredRowId) {
+      peersById[id] = record;
+      continue;
+    }
+    if (preferredRowId != null &&
+        current != null &&
+        _adminPeerRowId(current) == preferredRowId) {
+      continue;
+    }
     if (current == null ||
         _shouldPreferAdminPeer(
           record,
@@ -203,6 +249,8 @@ Map<String, dynamic> normalizeAdminPeerPayload(
 
   return <String, dynamic>{
     'id': peer['id'] ?? '',
+    'row_id': peer['row_id'] ?? peer['rowId'],
+    'group_id': peer['group_id'] ?? peer['groupId'],
     'info': <String, dynamic>{
       'device_name': peer['hostname'] ?? '',
       'os': _normalizeAdminPeerOs(peer['os']),
@@ -224,6 +272,29 @@ Uri buildGroupApiUri(Uri baseUri, GroupApiRequest request) {
     path: '$basePath${request.path}',
     queryParameters: request.queryParameters,
   );
+}
+
+GroupApiRequest buildGroupApiMutationRequest({
+  required GroupApiMutation mutation,
+}) {
+  switch (mutation) {
+    case GroupApiMutation.updatePeerGroup:
+      return const GroupApiRequest(
+        '/api/admin/peer/update',
+        <String, String>{},
+        usesAdminToken: true,
+      );
+  }
+}
+
+Map<String, dynamic> buildAdminPeerGroupUpdatePayload({
+  required int rowId,
+  required int groupId,
+}) {
+  return <String, dynamic>{
+    'row_id': rowId,
+    'group_id': groupId,
+  };
 }
 
 bool isAdminFromUserInfo(Map<String, dynamic>? userInfo) {
