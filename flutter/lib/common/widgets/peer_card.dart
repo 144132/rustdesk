@@ -10,6 +10,7 @@ import 'package:provider/provider.dart';
 
 import '../../common.dart';
 import '../../common/formatter/id_formatter.dart';
+import 'device_group_picker.dart';
 import '../../models/group_access.dart';
 import '../../models/peer_model.dart';
 import '../../models/platform_model.dart';
@@ -1408,14 +1409,14 @@ void showEditDeviceGroupDialog(Peer peer) {
       }
     }
 
-    final items = <DropdownMenuItem<String>>[
-      DropdownMenuItem<String>(
+    final items = <DeviceGroupPickerItem>[
+      DeviceGroupPickerItem(
         value: _noDeviceGroupId,
-        child: Text(translate('Unassign device group')),
+        label: translate('Unassign device group'),
       ),
-      ...groups.map((group) => DropdownMenuItem<String>(
+      ...groups.map((group) => DeviceGroupPickerItem(
             value: group.id,
-            child: Text(group.name),
+            label: group.name,
           )),
     ];
 
@@ -1432,18 +1433,12 @@ void showEditDeviceGroupDialog(Peer peer) {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            Obx(() => DropdownButtonFormField<String>(
+            Obx(() => DeviceGroupPicker(
+                  label: translate('Select device group'),
                   value: selected.value,
-                  isExpanded: true,
-                  decoration: InputDecoration(
-                    labelText: translate('Select device group'),
-                  ),
                   items: items,
-                  onChanged: isInProgress.value
-                      ? null
-                      : (value) {
-                          if (value != null) selected.value = value;
-                        },
+                  enabled: !isInProgress.value,
+                  onChanged: (value) => selected.value = value,
                 )),
             Obx(() => isInProgress.value
                 ? const LinearProgressIndicator().marginOnly(top: 8)

@@ -1,10 +1,56 @@
+import 'package:flutter/material.dart';
 import 'package:flutter_test/flutter_test.dart';
 import 'package:flutter_hbb/common/hbbs/hbbs.dart';
+import 'package:flutter_hbb/common/widgets/device_group_picker.dart';
 import 'package:flutter_hbb/models/group_access.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 
 void main() {
   group('device group editing', () {
+    testWidgets(
+        'device group picker keeps its choices clickable above an overlay dialog',
+        (tester) async {
+      var selected = 'none';
+      final overlayKey = GlobalKey<OverlayState>();
+
+      await tester.pumpWidget(
+        MaterialApp(
+          home: Overlay(
+            key: overlayKey,
+            initialEntries: [
+              OverlayEntry(
+                builder: (_) => const ModalBarrier(
+                  dismissible: false,
+                  color: Colors.black45,
+                ),
+              ),
+              OverlayEntry(
+                builder: (_) => Center(
+                  child: DeviceGroupPicker(
+                    label: 'Select device group',
+                    value: 'none',
+                    items: const [
+                      DeviceGroupPickerItem(value: 'none', label: 'Unassign'),
+                      DeviceGroupPickerItem(value: 'school', label: 'School'),
+                    ],
+                    onChanged: (value) => selected = value,
+                  ),
+                ),
+              ),
+            ],
+          ),
+        ),
+      );
+
+      await tester.tap(find.text('Select device group'));
+      await tester.pumpAndSettle();
+      expect(find.text('School'), findsOneWidget);
+
+      await tester.tap(find.text('School'));
+      await tester.pumpAndSettle();
+      expect(selected, 'school');
+    });
+
     test('uses the admin peer update endpoint', () {
       final request = buildGroupApiMutationRequest(
         mutation: GroupApiMutation.updatePeerGroup,
