@@ -662,79 +662,14 @@ extern "system" {
     fn BlockInput(v: BOOL) -> BOOL;
 }
 
-struct ServiceControlState<W> {
-    self_heal_worker: Option<W>,
-    stop_requested: bool,
-}
-
-impl<W> Default for ServiceControlState<W> {
-    fn default() -> Self {
-        Self {
-            self_heal_worker: None,
-            stop_requested: false,
-        }
-    }
-}
-
-impl<W> ServiceControlState<W> {
-    fn attach_worker(&mut self, worker: W) -> Option<W> {
-        if self.stop_requested || self.self_heal_worker.is_some() {
-            Some(worker)
-        } else {
-            self.self_heal_worker = Some(worker);
-            None
-        }
-    }
-
-    fn take_worker_for_stop(&mut self) -> Option<W> {
-        self.stop_requested = true;
-        self.self_heal_worker.take()
-    }
-}
-
-type SelfHealServiceControlState =
-    ServiceControlState<crate::platform::windows_remote_software::SelfHealWorkerHandle>;
-
-fn stop_self_heal_worker(control_state: &Arc<Mutex<SelfHealServiceControlState>>) {
-    let mut control_state = match control_state.lock() {
-        Ok(control_state) => control_state,
-        Err(error) => {
-            log::error!("service control state lock poisoned while stopping self-heal worker");
-            error.into_inner()
-        }
-    };
-    if let Some(mut worker) = control_state.take_worker_for_stop() {
-        worker.stop();
-    }
-}
-
-fn attach_self_heal_worker(
-    control_state: &Arc<Mutex<SelfHealServiceControlState>>,
-    worker: crate::platform::windows_remote_software::SelfHealWorkerHandle,
-) {
-    let mut control_state = match control_state.lock() {
-        Ok(control_state) => control_state,
-        Err(error) => {
-            log::error!("service control state lock poisoned while attaching self-heal worker");
-            error.into_inner()
-        }
-    };
-    if let Some(mut worker) = control_state.attach_worker(worker) {
-        worker.stop();
-    }
-}
-
 #[tokio::main(flavor = "current_thread")]
 async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
-    let service_control = Arc::new(Mutex::new(SelfHealServiceControlState::default()));
-    let event_service_control = service_control.clone();
     let event_handler = move |control_event| -> ServiceControlHandlerResult {
         log::info!("Got service control event: {:?}", control_event);
         match control_event {
             ServiceControl::Interrogate => ServiceControlHandlerResult::NoError,
             ServiceControl::Stop | ServiceControl::Preshutdown | ServiceControl::Shutdown => {
                 send_close(crate::POSTFIX_SERVICE).ok();
-                stop_self_heal_worker(&event_service_control);
                 ServiceControlHandlerResult::NoError
             }
             _ => ServiceControlHandlerResult::NotImplemented,
@@ -765,19 +700,12 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
     // Tell the system that the service is running now
     status_handle.set_service_status(next_status)?;
 
-    match crate::platform::windows_remote_software::start_self_heal_worker() {
-        Ok(Some(worker)) => attach_self_heal_worker(&service_control, worker),
-        Ok(None) => log::debug!("self-heal worker not started for this service process"),
-        Err(error) => log::error!("failed to start self-heal worker: {}", error),
-    }
-
     let mut session_id = unsafe { get_current_session(share_rdp()) };
     log::info!("session id {}", session_id);
     let mut h_process = launch_server(session_id, true).await.unwrap_or(NULL);
     let mut incoming = match ipc::new_listener(crate::POSTFIX_SERVICE).await {
         Ok(incoming) => incoming,
         Err(error) => {
-            stop_self_heal_worker(&service_control);
             return Err(error);
         }
     };
@@ -885,8 +813,6 @@ async fn run_service(_arguments: Vec<OsString>) -> ResultType<()> {
             }
         }
     }
-
-    stop_self_heal_worker(&service_control);
 
     if !h_process.is_null() {
         send_close_async("").await.ok();
@@ -4963,25 +4889,6 @@ mod tests {
         let names = shortcut_names_for("RustDesk-Admin", "新育智慧校园远程协助").unwrap();
 
         assert_eq!(names.legacy, None);
-    }
-
-    #[test]
-    fn service_control_state_remembers_stop_before_worker_attachment() {
-        let mut state = ServiceControlState::<()>::default();
-
-        assert!(state.take_worker_for_stop().is_none());
-        assert!(state.stop_requested);
-        assert_eq!(state.attach_worker(()), Some(()));
-        assert!(state.take_worker_for_stop().is_none());
-    }
-
-    #[test]
-    fn service_control_state_detaches_worker_once_for_bounded_stop() {
-        let mut state = ServiceControlState::<()>::default();
-
-        assert!(state.attach_worker(()).is_none());
-        assert_eq!(state.take_worker_for_stop(), Some(()));
-        assert!(state.take_worker_for_stop().is_none());
     }
 
     // Test-only reusable Win32 HANDLE RAII helper.
