@@ -23,6 +23,11 @@ const kUseTemporaryPassword = "use-temporary-password";
 const kUsePermanentPassword = "use-permanent-password";
 const kUseBothPasswords = "use-both-passwords";
 
+bool shouldShowConnectionManagerWindow(
+    bool isConnectionManager, bool hideCm, bool showCmWindow) {
+  return isConnectionManager && !hideCm && showCmWindow;
+}
+
 class ServerModel with ChangeNotifier {
   bool _isStart = false; // Android MainService status
   bool _mediaOk = false;
@@ -170,7 +175,12 @@ class ServerModel with ChangeNotifier {
             }
           } else {
             _zeroClientLengthCounter = 0;
-            if (!hideCm) showCmWindow();
+            if (shouldShowConnectionManagerWindow(
+                desktopType == DesktopType.cm,
+                hideCm,
+                _clients.any((client) => client.showCmWindow))) {
+              showCmWindow();
+            }
           }
         }
       }
@@ -512,7 +522,10 @@ class ServerModel with ChangeNotifier {
     if (desktopType == DesktopType.cm) {
       if (_clients.isEmpty) {
         hideCmWindow();
-      } else if (!hideCm) {
+      } else if (shouldShowConnectionManagerWindow(
+          desktopType == DesktopType.cm,
+          hideCm,
+          _clients.any((client) => client.showCmWindow))) {
         showCmWindow();
       }
     }
@@ -532,16 +545,19 @@ class ServerModel with ChangeNotifier {
           _clients.add(client);
         } else {
           if (_clients[index].authorized) {
+            _clients[index].showCmWindow = client.showCmWindow;
             _clients[index].privacyMode = client.privacyMode;
             notifyListeners();
             return;
           }
           _clients[index].authorized = true;
+          _clients[index].showCmWindow = client.showCmWindow;
           _clients[index].privacyMode = client.privacyMode;
         }
       } else {
         final index = _clients.indexWhere((c) => c.id == client.id);
         if (index >= 0) {
+          _clients[index].showCmWindow = client.showCmWindow;
           _clients[index].privacyMode = client.privacyMode;
           notifyListeners();
           return;
@@ -556,7 +572,8 @@ class ServerModel with ChangeNotifier {
         _clients.removeAt(index_disconnected);
         tabController.remove(index_disconnected);
       }
-      if (desktopType == DesktopType.cm && !hideCm) {
+      if (shouldShowConnectionManagerWindow(
+          desktopType == DesktopType.cm, hideCm, client.showCmWindow)) {
         showCmWindow();
       }
       scrollToBottom();
@@ -818,6 +835,7 @@ class Client {
   bool fromSwitch = false;
   bool inVoiceCall = false;
   bool incomingVoiceCall = false;
+  bool showCmWindow = true;
 
   RxInt unreadChatMessageCount = 0.obs;
 
@@ -847,6 +865,7 @@ class Client {
     fromSwitch = json['from_switch'];
     inVoiceCall = json['in_voice_call'];
     incomingVoiceCall = json['incoming_voice_call'];
+    showCmWindow = json['show_cm_window'] ?? true;
   }
 
   Map<String, dynamic> toJson() {
@@ -872,6 +891,7 @@ class Client {
     data['from_switch'] = fromSwitch;
     data['in_voice_call'] = inVoiceCall;
     data['incoming_voice_call'] = incomingVoiceCall;
+    data['show_cm_window'] = showCmWindow;
     return data;
   }
 

