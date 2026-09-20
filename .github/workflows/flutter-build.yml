@@ -245,18 +245,13 @@ jobs:
         working-directory: flutter
         run: flutter pub get
 
-      - name: Run remote software form tests
-        working-directory: flutter
-        run: flutter test test/remote_software_install_test.dart
-
-      - name: Analyze remote software Flutter files
+      - name: Analyze Flutter remote files
         working-directory: flutter
         run: >-
           flutter analyze --no-fatal-infos
           lib/models/model.dart
           lib/desktop/pages/remote_page.dart
           lib/desktop/widgets/remote_toolbar.dart
-          lib/desktop/widgets/remote_software_install_dialog.dart
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
@@ -302,12 +297,6 @@ jobs:
         if: ${{ matrix.job.arch == 'aarch64' }}
         shell: bash
         run: echo "SODIUM_LIB_DIR=$VCPKG_ROOT/installed/${{ matrix.job.vcpkg-triplet }}/lib" >> "$GITHUB_ENV"
-
-      - name: Run Windows remote software tests
-        uses: actions-rs/cargo@844f36862e911db73fe0815f00a4a2602c279505 # v1
-        with:
-          command: test
-          args: --locked --lib windows_remote_software --features flutter
 
       - name: Build rustdesk
         run: |

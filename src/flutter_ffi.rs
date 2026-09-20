@@ -11,22 +11,13 @@ use crate::{
     input::*,
     ui_interface::{self, *},
 };
-use crate::remote_software::{
-    validate_manifest, DetectionRule, InstallMode, InstallerType, RemoteSoftwareManifest,
-};
 use flutter_rust_bridge::{StreamSink, SyncReturn};
 use hbb_common::{
-    anyhow::anyhow,
     config::{self, LocalConfig, PeerConfig, PeerInfoSerde},
     fs, lazy_static, log,
     rendezvous_proto::ConnType,
     ResultType,
 };
-use hbb_common::message_proto::{
-    Message, SoftwareDetectionType, SoftwareInstallAction, SoftwareInstallCancel,
-    SoftwareInstallMode, SoftwareInstallRequest, SoftwareInstallerType,
-};
-use serde_json::Value;
 use std::{
     collections::HashMap,
     path::PathBuf,
@@ -38,158 +29,6 @@ use std::{
 };
 
 pub type SessionID = uuid::Uuid;
-
-const REMOTE_SOFTWARE_MANIFEST_FIELDS: &[&str] = &[
-    "request_id",
-    "software_name",
-    "package_url",
-    "sha256",
-    "installer_type",
-    "detection_rule",
-    "silent_args",
-    "mode",
-];
-
-fn parse_software_install_request(manifest_json: &str) -> Result<SoftwareInstallRequest, String> {
-    let value: Value = serde_json::from_str(manifest_json)
-        .map_err(|error| format!("invalid manifest JSON: {error}"))?;
-    let object = value
-        .as_object()
-        .ok_or_else(|| "software install manifest must be a JSON object".to_owned())?;
-    if object.len() != REMOTE_SOFTWARE_MANIFEST_FIELDS.len()
-        || object
-            .keys()
-            .any(|key| !REMOTE_SOFTWARE_MANIFEST_FIELDS.contains(&key.as_str()))
-    {
-        return Err("software install manifest contains unknown or missing fields".to_owned());
-    }
-
-    let manifest: RemoteSoftwareManifest = serde_json::from_value(value)
-        .map_err(|error| format!("invalid software install manifest: {error}"))?;
-    validate_manifest(&manifest).map_err(|error| error.to_string())?;
-
-    let RemoteSoftwareManifest {
-        request_id,
-        software_name,
-        package_url,
-        sha256,
-        installer_type,
-        detection_rule,
-        silent_args,
-        mode,
-    } = manifest;
-    let installer_type = match installer_type {
-        InstallerType::Msi => SoftwareInstallerType::Msi,
-        InstallerType::Exe => SoftwareInstallerType::Exe,
-    };
-    let (detection_type, detection_value) = match detection_rule {
-        DetectionRule::MsiProductCode(value) => (SoftwareDetectionType::MsiProductCode, value),
-        DetectionRule::UninstallDisplayName(value) => {
-            (SoftwareDetectionType::UninstallDisplayName, value)
-        }
-        DetectionRule::ExePath(value) => (SoftwareDetectionType::ExePath, value),
-    };
-    let mode = match mode {
-        InstallMode::DownloadOnly => SoftwareInstallMode::DownloadOnly,
-        InstallMode::DownloadAndInstall => SoftwareInstallMode::DownloadAndInstall,
-    };
-    Ok(SoftwareInstallRequest {
-        request_id,
-        software_name,
-        package_url,
-        sha256,
-        installer_type: installer_type.into(),
-        detection_type: detection_type.into(),
-        detection_value,
-        silent_args,
-        mode: mode.into(),
-        ..Default::default()
-    })
-}
-
-fn software_install_ffi_result<E: std::fmt::Display>(result: Result<(), E>) -> String {
-    match result {
-        Ok(()) => String::new(),
-        Err(error) => error.to_string(),
-    }
-}
-
-#[cfg(test)]
-mod software_install_ffi_tests {
-    use super::{parse_software_install_request, software_install_ffi_result};
-    use hbb_common::message_proto::{SoftwareDetectionType, SoftwareInstallMode};
-
-    fn corrected_manifest() -> String {
-        serde_json::json!({
-            "request_id": "request-1",
-            "software_name": "Example",
-            "package_url": "https://update.szxinyu.com/packages/example.exe",
-            "sha256": "0".repeat(64),
-            "installer_type": "exe",
-            "detection_rule": { "exe_path": "C:\\Program Files\\Example\\example.exe" },
-            "silent_args": ["/S"],
-            "mode": "download_and_install"
-        })
-        .to_string()
-    }
-
-    #[test]
-    fn parses_corrected_manifest_and_maps_detection_rule() {
-        let request = parse_software_install_request(&corrected_manifest()).unwrap();
-
-        assert_eq!(request.request_id, "request-1");
-        assert_eq!(request.detection_type, SoftwareDetectionType::ExePath.into());
-        assert_eq!(request.detection_value, r"C:\Program Files\Example\example.exe");
-        assert_eq!(request.silent_args, vec!["/S"]);
-        assert_eq!(request.mode, SoftwareInstallMode::DownloadAndInstall.into());
-    }
-
-    #[test]
-    fn rejects_legacy_flat_detection_shape() {
-        let mut manifest: serde_json::Value = serde_json::from_str(&corrected_manifest()).unwrap();
-        manifest["detection_type"] = serde_json::json!("exe_path");
-        manifest["detection_value"] = serde_json::json!(r"C:\Program Files\Example\example.exe");
-        manifest.as_object_mut().unwrap().remove("detection_rule");
-
-        assert!(parse_software_install_request(&manifest.to_string()).is_err());
-    }
-
-    #[test]
-    fn rejects_unknown_manifest_fields_before_deserialization() {
-        let mut manifest: serde_json::Value = serde_json::from_str(&corrected_manifest()).unwrap();
-        manifest["shell"] = serde_json::json!("cmd.exe /c whoami");
-
-        assert!(parse_software_install_request(&manifest.to_string()).is_err());
-    }
-
-    #[test]
-    fn converts_software_install_dispatch_errors_to_ffi_messages() {
-        assert_eq!(software_install_ffi_result(Ok::<(), &str>(())), "");
-        assert_eq!(
-            software_install_ffi_result(Err::<(), _>("session not found")),
-            "session not found"
-        );
-    }
-
-    #[test]
-    fn remote_software_install_exports_use_codegen_compatible_return_types() {
-        let source = include_str!("flutter_ffi.rs");
-        for function_name in ["session_software_install", "session_software_install_cancel"] {
-            let marker = format!("pub fn {function_name}(");
-            let start = source
-                .find(&marker)
-                .expect("remote software install export must exist");
-            let signature_end = source[start..]
-                .find('{')
-                .expect("remote software install export must have a body");
-            let signature = &source[start..start + signature_end];
-            assert!(
-                signature.contains("-> SyncReturn<String>"),
-                "{function_name} must use SyncReturn<String> for the pinned Flutter Rust Bridge codegen"
-            );
-        }
-    }
-}
 
 lazy_static::lazy_static! {
     static ref TEXTURE_RENDER_KEY: Arc<AtomicI32> = Arc::new(AtomicI32::new(0));
@@ -356,52 +195,6 @@ pub fn session_start_with_displays(
         }
     }
     Ok(())
-}
-
-pub fn session_software_install(
-    session_id: SessionID,
-    manifest_json: String,
-) -> SyncReturn<String> {
-    let result = (|| {
-        let request =
-            parse_software_install_request(&manifest_json).map_err(|error| anyhow!("{error}"))?;
-        let mut action = SoftwareInstallAction::new();
-        action.set_request(request);
-        let mut message = Message::new();
-        message.set_software_install_action(action);
-
-        let Some(session) = sessions::get_session_by_session_id(&session_id) else {
-            return Err(anyhow!("session not found: {session_id}"));
-        };
-        session.send(crate::client::Data::Message(message));
-        Ok(())
-    })();
-    SyncReturn(software_install_ffi_result(result))
-}
-
-pub fn session_software_install_cancel(
-    session_id: SessionID,
-    request_id: String,
-) -> SyncReturn<String> {
-    let result = (|| {
-        if request_id.trim().is_empty() {
-            return Err(anyhow!("request_id must not be empty"));
-        }
-
-        let Some(session) = sessions::get_session_by_session_id(&session_id) else {
-            return Err(anyhow!("session not found: {session_id}"));
-        };
-        let mut action = SoftwareInstallAction::new();
-        action.set_cancel(SoftwareInstallCancel {
-            request_id,
-            ..Default::default()
-        });
-        let mut message = Message::new();
-        message.set_software_install_action(action);
-        session.send(crate::client::Data::Message(message));
-        Ok(())
-    })();
-    SyncReturn(software_install_ffi_result(result))
 }
 
 pub fn session_get_remember(session_id: SessionID) -> Option<bool> {

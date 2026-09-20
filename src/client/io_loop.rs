@@ -92,7 +92,6 @@ struct ParsedPeerInfo {
     idd_impl: String,
     support_view_camera: bool,
     support_terminal: bool,
-    support_software_install: bool,
 }
 
 impl ParsedPeerInfo {
@@ -2134,14 +2133,6 @@ impl<T: InvokeUiSession> Remote<T> {
                     }
                     self.handler.handle_terminal_response(response);
                 }
-                Some(message::Union::SoftwareInstallStatus(status)) => {
-                    if !self.peer_info.support_software_install {
-                        log::debug!(
-                            "Received software install status from a peer without the advertised capability"
-                        );
-                    }
-                    self.handler.handle_software_install_status(status);
-                }
                 _ => {}
             }
         }
@@ -2155,9 +2146,6 @@ impl<T: InvokeUiSession> Remote<T> {
         if let Some(features) = pi.features.as_ref() {
             self.peer_info.support_terminal = features.terminal;
         }
-        self.peer_info.support_software_install =
-            client::software_install_feature_supported(pi.features.as_ref());
-
         if let Ok(platform_additions) =
             serde_json::from_str::<HashMap<String, serde_json::Value>>(&pi.platform_additions)
         {

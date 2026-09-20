@@ -8,9 +8,6 @@ pub use windows::*;
 #[cfg(windows)]
 pub mod windows;
 
-#[cfg(any(windows, test))]
-pub mod windows_remote_software;
-
 #[cfg(windows)]
 pub mod win_device;
 
