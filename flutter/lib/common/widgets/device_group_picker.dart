@@ -60,8 +60,9 @@ class _DeviceGroupPickerState extends State<DeviceGroupPicker> {
     if (overlay == null) return;
 
     final renderObject = _targetKey.currentContext?.findRenderObject();
-    final targetWidth = renderObject is RenderBox ? renderObject.size.width : 0;
-    final width = targetWidth > 0 ? targetWidth : 240.0;
+    final double targetWidth =
+        renderObject is RenderBox ? renderObject.size.width : 0.0;
+    final double width = targetWidth > 0 ? targetWidth : 240.0;
 
     _menuEntry = OverlayEntry(
       builder: (context) => Stack(
