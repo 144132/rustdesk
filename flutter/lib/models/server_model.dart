@@ -179,7 +179,9 @@ class ServerModel with ChangeNotifier {
     } else {
       await windowManager.setAlwaysOnTop(true);
       await showCmWindow();
-      await windowOnTop(null);
+      if (!hideCm && !isConnectionInfoOnlyWindow) {
+        await windowOnTop(null);
+      }
     }
   }
 
