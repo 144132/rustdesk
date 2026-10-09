@@ -134,7 +134,8 @@ class ConnectionManagerState extends State<ConnectionManager>
             gFFI.serverModel.clients.firstWhereOrNull((e) => e.id == client_id);
         if (client != null) {
           gFFI.chatModel.changeCurrentKey(MessageKey(client.peerId, client.id));
-          if (client.unreadChatMessageCount.value > 0) {
+          if (client.unreadChatMessageCount.value > 0 &&
+              !gFFI.serverModel.isConnectionInfoOnly(client)) {
             WidgetsBinding.instance.addPostFrameCallback((_) {
               client.unreadChatMessageCount.value = 0;
               gFFI.chatModel.showChatPage(MessageKey(client.peerId, client.id));
@@ -200,8 +201,9 @@ class ConnectionManagerState extends State<ConnectionManager>
             child: DesktopTab(
               showTitle: false,
               showMaximize: false,
-              showMinimize: true,
-              showClose: true,
+              showMinimize: !serverModel.isConnectionInfoOnlyWindow,
+              showClose:
+                  !serverModel.clients.any(serverModel.isConnectionInfoOnly),
               onWindowCloseButton: handleWindowCloseButton,
               controller: serverModel.tabController,
               selectedBorderColor: MyTheme.accent,
@@ -217,8 +219,10 @@ class ConnectionManagerState extends State<ConnectionManager>
                         message: key,
                         waitDuration: Duration(seconds: 1),
                         child: label),
-                    unreadMessageCountBuilder(client?.unreadChatMessageCount)
-                        .marginOnly(left: 4),
+                    if (client == null ||
+                        !serverModel.isConnectionInfoOnly(client))
+                      unreadMessageCountBuilder(client?.unreadChatMessageCount)
+                          .marginOnly(left: 4),
                   ],
                 );
               },
@@ -279,6 +283,10 @@ class ConnectionManagerState extends State<ConnectionManager>
   Widget buildSidePage() {
     final selected = gFFI.serverModel.tabController.state.value.selected;
     if (selected < 0 || selected >= gFFI.serverModel.clients.length) {
+      return Offstage();
+    }
+    if (gFFI.serverModel
+        .isConnectionInfoOnly(gFFI.serverModel.clients[selected])) {
       return Offstage();
     }
     final clientType = gFFI.serverModel.clients[selected].type_();
@@ -368,18 +376,20 @@ Widget buildConnectionCard(Client client) {
       key: ValueKey(client.id),
       children: [
         _CmHeader(client: client),
-        client.type_() == ClientType.file ||
+        value.isConnectionInfoOnly(client) ||
+                client.type_() == ClientType.file ||
                 client.type_() == ClientType.portForward ||
                 client.type_() == ClientType.terminal ||
                 client.disconnected
             ? Offstage()
             : _PrivilegeBoard(client: client),
-        Expanded(
-          child: Align(
-            alignment: Alignment.bottomCenter,
-            child: _CmControlPanel(client: client),
-          ),
-        )
+        if (!value.isConnectionInfoOnly(client))
+          Expanded(
+            child: Align(
+              alignment: Alignment.bottomCenter,
+              child: _CmControlPanel(client: client),
+            ),
+          )
       ],
     ).paddingSymmetric(vertical: 4.0, horizontal: 8.0),
   );
@@ -555,7 +565,9 @@ class _CmHeaderState extends State<_CmHeader>
             ),
           ),
           Offstage(
-            offstage: !client.authorized ||
+            offstage: Provider.of<ServerModel>(context)
+                    .isConnectionInfoOnly(client) ||
+                !client.authorized ||
                 (client.type_() != ClientType.remote &&
                     client.type_() != ClientType.file &&
                     client.type_() != ClientType.camera),
@@ -1083,7 +1095,11 @@ class _CmControlPanel extends StatelessWidget {
           child: buildButton(context, color: Colors.green[700], onClick: () {
             handleAccept(context);
             handleElevate(context);
-            windowManager.minimize();
+            if (!(isWindows &&
+                model.cmAccountLoggedIn &&
+                client.type_() == ClientType.remote)) {
+              windowManager.minimize();
+            }
           },
               text: 'Accept and Elevate',
               icon: Icon(
@@ -1106,7 +1122,11 @@ class _CmControlPanel extends StatelessWidget {
                       color: MyTheme.accent,
                       onClick: () {
                         handleAccept(context);
-                        windowManager.minimize();
+                        if (!(isWindows &&
+                            model.cmAccountLoggedIn &&
+                            client.type_() == ClientType.remote)) {
+                          windowManager.minimize();
+                        }
                       },
                       text: 'Accept',
                       textColor: Colors.white,

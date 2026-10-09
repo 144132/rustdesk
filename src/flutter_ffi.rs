@@ -2247,6 +2247,14 @@ pub fn cm_switch_back(conn_id: i32) {
 }
 
 pub fn cm_get_config(name: String) -> String {
+    #[cfg(target_os = "windows")]
+    if name == "account-logged-in" {
+        // The CM runs separately from the account UI; its cached local config can be stale.
+        return (!hbb_common::config::LocalConfig::get_option_from_file("access_token")
+            .trim()
+            .is_empty())
+        .to_string();
+    }
     #[cfg(not(target_os = "ios"))]
     {
         if let Ok(Some(v)) = crate::ipc::get_config(&name) {

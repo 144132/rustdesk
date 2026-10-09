@@ -262,6 +262,11 @@ class ChatModel with ChangeNotifier {
   showChatPage(MessageKey key) async {
     if (isDesktop) {
       if (isConnManager) {
+        final client = gFFI.serverModel.clients
+            .firstWhereOrNull((client) => client.id == key.connId);
+        if (client != null && gFFI.serverModel.isConnectionInfoOnly(client)) {
+          return;
+        }
         if (!_isShowCMSidePage) {
           await toggleCMChatPage(key);
         }
@@ -291,7 +296,16 @@ class ChatModel with ChangeNotifier {
   }
 
   var _togglingCMSidePage = false; // protect order for await
+
+  Future<void> hideCMSidePage() async {
+    _isShowCMSidePage = false;
+    notifyListeners();
+    await windowManager.setSizeAlignment(
+        kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+  }
+
   toggleCMSidePage() async {
+    if (gFFI.serverModel.isConnectionInfoOnlyWindow) return false;
     if (_togglingCMSidePage) return false;
     _togglingCMSidePage = true;
     if (_isShowCMSidePage) {
@@ -316,6 +330,9 @@ class ChatModel with ChangeNotifier {
       notifyListeners();
     }
     _togglingCMSidePage = false;
+    if (gFFI.serverModel.isConnectionInfoOnlyWindow) {
+      await hideCMSidePage();
+    }
   }
 
   changeCurrentKey(MessageKey key) {
@@ -412,7 +429,9 @@ class ChatModel with ChangeNotifier {
         return;
       }
       if (isDesktop) {
-        windowOnTop(null);
+        if (!session.serverModel.isConnectionInfoOnly(client)) {
+          windowOnTop(null);
+        }
         // disable auto jumpTo other tab when hasFocus, and mark unread message
         final currentSelectedTab =
             session.serverModel.tabController.state.value.selectedTabInfo;

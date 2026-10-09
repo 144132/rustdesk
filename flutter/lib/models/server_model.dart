@@ -12,6 +12,7 @@ import 'package:window_manager/window_manager.dart';
 
 import '../common.dart';
 import '../common/formatter/id_formatter.dart';
+import '../desktop/cm_window_policy.dart';
 import '../desktop/pages/server_page.dart' as desktop;
 import '../desktop/widgets/tabbar_widget.dart';
 import '../mobile/pages/server_page.dart';
@@ -37,6 +38,7 @@ class ServerModel with ChangeNotifier {
   bool _clipboardOk = false;
   bool _showElevation = false;
   bool hideCm = false;
+  bool _cmAccountLoggedIn = true;
   int _connectStatus = 0; // Rendezvous Server status
   String _verificationMethod = "";
   String _temporaryPasswordLength = "";
@@ -131,6 +133,56 @@ class ServerModel with ChangeNotifier {
 
   List<Client> get clients => _clients;
 
+  bool get cmAccountLoggedIn => _cmAccountLoggedIn;
+
+  ConnectionManagerWindowMode _cmWindowMode(Client client) {
+    return connectionManagerWindowMode(
+      isWindows: isWindows && desktopType == DesktopType.cm,
+      isLoggedIn: _cmAccountLoggedIn,
+      authorized: client.authorized,
+      isRemoteDesktop: client.type_() == ClientType.remote,
+      showCmWindow: client.showCmWindow,
+    );
+  }
+
+  bool isConnectionInfoOnly(Client client) =>
+      _cmWindowMode(client) == ConnectionManagerWindowMode.minimized;
+
+  bool get isConnectionInfoOnlyWindow =>
+      _clients.isNotEmpty && _clients.every(isConnectionInfoOnly);
+
+  bool _clientRequestsCmWindow(Client client) =>
+      _cmWindowMode(client) != ConnectionManagerWindowMode.hidden;
+
+  Future<void> refreshCmAccountState() async {
+    if (!isWindows || desktopType != DesktopType.cm || isTest) return;
+    final status = await bind.cmGetConfig(name: 'account-logged-in');
+    if (status != 'true' && status != 'false') return;
+    final loggedIn = status == 'true';
+    if (_cmAccountLoggedIn == loggedIn) return;
+    _cmAccountLoggedIn = loggedIn;
+    notifyListeners();
+    if (!isCmWindowReady ||
+        hideCm ||
+        !_clients.any((client) =>
+            client.authorized && client.type_() == ClientType.remote)) {
+      return;
+    }
+    cmHiddenTimer?.cancel();
+    cmHiddenTimer = null;
+    if (isConnectionInfoOnlyWindow) {
+      await windowManager.setAlwaysOnTop(false);
+      await windowManager.setSkipTaskbar(false);
+      await parent.target?.chatModel.hideCMSidePage();
+      await showCmWindow();
+      if (isConnectionInfoOnlyWindow) await windowManager.minimize();
+    } else {
+      await windowManager.setAlwaysOnTop(true);
+      await showCmWindow();
+      await windowOnTop(null);
+    }
+  }
+
   final controller = ScrollController();
 
   WeakReference<FFI> parent;
@@ -162,6 +214,7 @@ class ServerModel with ChangeNotifier {
       }
 
       if (desktopType == DesktopType.cm) {
+        await refreshCmAccountState();
         final res = await bind.cmCheckClientsLength(length: _clients.length);
         if (res != null) {
           debugPrint("clients not match!");
@@ -175,10 +228,8 @@ class ServerModel with ChangeNotifier {
             }
           } else {
             _zeroClientLengthCounter = 0;
-            if (shouldShowConnectionManagerWindow(
-                desktopType == DesktopType.cm,
-                hideCm,
-                _clients.any((client) => client.showCmWindow))) {
+            if (shouldShowConnectionManagerWindow(desktopType == DesktopType.cm,
+                hideCm, _clients.any(_clientRequestsCmWindow))) {
               showCmWindow();
             }
           }
@@ -525,7 +576,7 @@ class ServerModel with ChangeNotifier {
       } else if (shouldShowConnectionManagerWindow(
           desktopType == DesktopType.cm,
           hideCm,
-          _clients.any((client) => client.showCmWindow))) {
+          _clients.any(_clientRequestsCmWindow))) {
         showCmWindow();
       }
     }
@@ -572,8 +623,8 @@ class ServerModel with ChangeNotifier {
         _clients.removeAt(index_disconnected);
         tabController.remove(index_disconnected);
       }
-      if (shouldShowConnectionManagerWindow(
-          desktopType == DesktopType.cm, hideCm, client.showCmWindow)) {
+      if (shouldShowConnectionManagerWindow(desktopType == DesktopType.cm,
+          hideCm, _clientRequestsCmWindow(client))) {
         showCmWindow();
       }
       scrollToBottom();
@@ -593,12 +644,46 @@ class ServerModel with ChangeNotifier {
         onTap: () {},
         page: desktop.buildConnectionCard(client)));
     Future.delayed(Duration.zero, () async {
+      if (isWindows && desktopType == DesktopType.cm) {
+        await cmWindowReady;
+        await refreshCmAccountState();
+        if (!_clients.any((current) => current.id == client.id)) return;
+      }
+      if (isConnectionInfoOnly(client)) {
+        if (!hideCm && isConnectionInfoOnlyWindow) {
+          await showCmWindow();
+          await windowManager.setAlwaysOnTop(false);
+          await windowManager.setSkipTaskbar(false);
+          if (isConnectionInfoOnlyWindow) await windowManager.minimize();
+        }
+        return;
+      }
       if (!hideCm) windowOnTop(null);
     });
+    if (isWindows &&
+        desktopType == DesktopType.cm &&
+        client.authorized &&
+        client.type_() == ClientType.remote) {
+      cmHiddenTimer?.cancel();
+      cmHiddenTimer = null;
+    }
     // Only do the hidden task when on Desktop.
-    if (client.authorized && isDesktop) {
+    if (client.authorized &&
+        isDesktop &&
+        !(isWindows &&
+            desktopType == DesktopType.cm &&
+            client.type_() == ClientType.remote)) {
       cmHiddenTimer = Timer(const Duration(seconds: 3), () {
-        if (!hideCm) windowManager.minimize();
+        if (!hideCm &&
+            !(isWindows &&
+                desktopType == DesktopType.cm &&
+                _cmAccountLoggedIn &&
+                _clients.any((client) =>
+                    client.authorized &&
+                    !client.disconnected &&
+                    client.type_() == ClientType.remote))) {
+          windowManager.minimize();
+        }
         cmHiddenTimer = null;
       });
     }
@@ -771,7 +856,7 @@ class ServerModel with ChangeNotifier {
         if (client.incomingVoiceCall) {
           if (isAndroid) {
             showVoiceCallDialog(client);
-          } else {
+          } else if (!isConnectionInfoOnly(_clients[index])) {
             // Has incoming phone call, let's set the window on top.
             Future.delayed(Duration.zero, () {
               windowOnTop(null);

@@ -45,7 +45,7 @@ env:
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   VCPKG_CMAKE_VERSION: "4.3.0"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836" # 2025.01.13, got "/opt/artifacts/vcpkg/vcpkg: No such file or directory" with latest version
-  VERSION: "1.5.1-202609201452"
+  VERSION: "1.5.1-202610100032"
   ANDROID_BUILD_NUMBER: "2026092010"
   NDK_VERSION: "r28c"
   #signing keys env variable checks
@@ -245,13 +245,28 @@ jobs:
         working-directory: flutter
         run: flutter pub get
 
-      - name: Analyze Flutter remote files
+      - name: Verify x64 baseline dependency locks
+        if: ${{ matrix.job.arch == 'x86_64' }}
+        shell: bash
+        run: git diff --exit-code HEAD -- Cargo.lock flutter/pubspec.lock flutter/pubspec.yaml libs/hbb_common
+
+      - name: Analyze Flutter remote and connection manager files
         working-directory: flutter
         run: >-
           flutter analyze --no-fatal-infos
           lib/models/model.dart
           lib/desktop/pages/remote_page.dart
           lib/desktop/widgets/remote_toolbar.dart
+          lib/desktop/cm_window_policy.dart
+          lib/desktop/pages/server_page.dart
+          lib/main.dart
+          lib/models/chat_model.dart
+          lib/models/server_model.dart
+          test/cm_window_policy_test.dart
+
+      - name: Test Flutter suite
+        working-directory: flutter
+        run: flutter test
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1
