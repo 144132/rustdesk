@@ -45,8 +45,8 @@ env:
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   VCPKG_CMAKE_VERSION: "4.3.0"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836" # 2025.01.13, got "/opt/artifacts/vcpkg/vcpkg: No such file or directory" with latest version
-  VERSION: "1.5.1-202609211555"
-  ANDROID_BUILD_NUMBER: "2026092010"
+  VERSION: "1.5.1-202610092236"
+  ANDROID_BUILD_NUMBER: "2026100922"
   NDK_VERSION: "r28c"
   #signing keys env variable checks
   ANDROID_SIGNING_KEY: "${{ secrets.ANDROID_SIGNING_KEY }}"
@@ -310,6 +310,15 @@ jobs:
         if: ${{ matrix.job.arch == 'aarch64' }}
         shell: bash
         run: echo "SODIUM_LIB_DIR=$VCPKG_ROOT/installed/${{ matrix.job.vcpkg-triplet }}/lib" >> "$GITHUB_ENV"
+
+      - name: Test upstream security and reconnect fixes
+        shell: bash
+        run: |
+          set -e
+          cargo test --locked -p hbb_common --lib send_confirm_past_last_file_does_not_panic
+          cargo test --locked -p hbb_common --lib test_secured_stream_rejects_plaintext_text
+          cargo test --locked --features flutter,hwcodec --lib only_a_newer_remote_control_of_the_same_session_keeps_the_screen_unlocked
+          cargo test --locked --features flutter,hwcodec --lib test_is_file_data_request
 
       - name: Build rustdesk
         run: |
