@@ -245,7 +245,7 @@ jobs:
         working-directory: flutter
         run: flutter pub get
 
-      - name: Analyze Flutter remote files
+      - name: Analyze Flutter remote and connection manager files
         working-directory: flutter
         run: >-
           flutter analyze --no-fatal-infos
@@ -254,7 +254,17 @@ jobs:
           lib/desktop/widgets/remote_toolbar.dart
           lib/common/widgets/device_group_picker.dart
           lib/common/widgets/peer_card.dart
+          lib/desktop/cm_window_policy.dart
+          lib/desktop/pages/server_page.dart
+          lib/main.dart
+          lib/models/chat_model.dart
+          lib/models/server_model.dart
           test/device_group_edit_test.dart
+          test/cm_window_policy_test.dart
+
+      - name: Test Windows connection manager policy
+        working-directory: flutter
+        run: flutter test test/cm_window_policy_test.dart
 
       - name: Install Rust toolchain
         uses: dtolnay/rust-toolchain@e97e2d8cc328f1b50210efc529dca0028893a2d9 # v1

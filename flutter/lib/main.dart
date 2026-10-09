@@ -287,6 +287,7 @@ void runMultiWindow(
 
 void runConnectionManagerScreen() async {
   await initEnv(kAppTypeConnectionManager);
+  await gFFI.serverModel.refreshCmAccountState();
   _runApp(
     '',
     const DesktopServerPage(),
@@ -297,7 +298,12 @@ void runConnectionManagerScreen() async {
   if (hide) {
     await hideCmWindow(isStartup: true);
   } else {
-    await showCmWindow(isStartup: true);
+    await showCmWindow(
+        isStartup: true,
+        minimized: isWindows &&
+            !gFFI.serverModel.cmAccountLoggedIn &&
+            (gFFI.serverModel.clients.isEmpty ||
+                gFFI.serverModel.isConnectionInfoOnlyWindow));
   }
   setResizable(false);
   // Start the uni links handler and redirect links to Native, not for Flutter.
@@ -305,8 +311,44 @@ void runConnectionManagerScreen() async {
 }
 
 bool _isCmReadyToShow = false;
+final _cmWindowReady = Completer<void>();
 
-showCmWindow({bool isStartup = false}) async {
+Future<void> get cmWindowReady => _cmWindowReady.future;
+
+bool get isCmWindowReady => _isCmReadyToShow;
+
+showCmWindow({bool isStartup = false, bool minimized = false}) async {
+  if (minimized ||
+      (!isStartup && gFFI.serverModel.isConnectionInfoOnlyWindow)) {
+    if (isStartup) {
+      await windowManager.setOpacity(0);
+      await windowManager.waitUntilReadyToShow(
+          getHiddenTitleBarWindowOptions(
+              size: kConnectionManagerWindowSizeClosedChat),
+          null);
+      bind.mainHideDock();
+      await windowManager.setSizeAlignment(
+          kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
+    }
+    if (isStartup ||
+        (_isCmReadyToShow && await windowManager.getOpacity() != 1)) {
+      await windowManager.setOpacity(0);
+      await windowManager.setAlwaysOnTop(false);
+      await windowManager.setSkipTaskbar(false);
+      await windowManager.show();
+      if (isStartup || gFFI.serverModel.isConnectionInfoOnlyWindow) {
+        await windowManager.minimize();
+      } else {
+        await windowOnTop(null);
+      }
+      await windowManager.setOpacity(1);
+    }
+    if (isStartup) {
+      _isCmReadyToShow = true;
+      if (!_cmWindowReady.isCompleted) _cmWindowReady.complete();
+    }
+    return;
+  }
   if (isStartup) {
     WindowOptions windowOptions = getHiddenTitleBarWindowOptions(
         size: kConnectionManagerWindowSizeClosedChat, alwaysOnTop: true);
@@ -321,6 +363,7 @@ showCmWindow({bool isStartup = false}) async {
     await windowManager.setSizeAlignment(
         kConnectionManagerWindowSizeClosedChat, Alignment.topRight);
     _isCmReadyToShow = true;
+    if (!_cmWindowReady.isCompleted) _cmWindowReady.complete();
   } else if (_isCmReadyToShow) {
     if (await windowManager.getOpacity() != 1) {
       await windowManager.setOpacity(1);
@@ -343,6 +386,7 @@ hideCmWindow({bool isStartup = false}) async {
     await windowManager.minimize();
     await windowManager.hide();
     _isCmReadyToShow = true;
+    if (!_cmWindowReady.isCompleted) _cmWindowReady.complete();
   } else if (_isCmReadyToShow) {
     if (await windowManager.getOpacity() != 0) {
       await windowManager.setOpacity(0);
