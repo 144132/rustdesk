@@ -13,6 +13,7 @@ import 'package:flutter_hbb/desktop/widgets/material_mod_popup_menu.dart'
     as mod_menu;
 import 'package:flutter_hbb/desktop/widgets/tabbar_widget.dart';
 import 'package:flutter_hbb/models/ab_model.dart';
+import 'package:flutter_hbb/models/address_book_sort.dart';
 import 'package:flutter_hbb/models/peer_model.dart';
 
 import 'package:flutter_hbb/models/peer_tab_model.dart';
@@ -564,7 +565,9 @@ class _PeerTabPageState extends State<PeerTabPage>
       _createPeerViewTypeSwitch(context),
       Offstage(
         offstage: model.currentTab == PeerTabIndex.recent.index,
-        child: PeerSortDropdown(),
+        child: PeerSortDropdown(
+          isAddressBook: model.currentTab == PeerTabIndex.ab.index,
+        ),
       ),
       Offstage(
         offstage: model.currentTab != PeerTabIndex.ab.index,
@@ -629,7 +632,10 @@ class _PeerTabPageState extends State<PeerTabPage>
     ];
     final List<Widget> dynamicActions = [
       if (model.currentTabCachedPeers.isNotEmpty) _createMultiSelection(),
-      if (model.currentTab != PeerTabIndex.recent.index) PeerSortDropdown(),
+      if (model.currentTab != PeerTabIndex.recent.index)
+        PeerSortDropdown(
+          isAddressBook: model.currentTab == PeerTabIndex.ab.index,
+        ),
       if (model.currentTab == PeerTabIndex.ab.index) _toggleTags()
     ];
     final rightWidth = availableWidth -
@@ -860,7 +866,9 @@ class _PeerViewDropdownState extends State<PeerViewDropdown> {
 }
 
 class PeerSortDropdown extends StatefulWidget {
-  const PeerSortDropdown({super.key});
+  final bool isAddressBook;
+
+  const PeerSortDropdown({super.key, this.isAddressBook = false});
 
   @override
   State<PeerSortDropdown> createState() => _PeerSortDropdownState();
@@ -883,6 +891,13 @@ class _PeerSortDropdownState extends State<PeerSortDropdown> {
 
   @override
   Widget build(BuildContext context) {
+    final selectedSort = widget.isAddressBook ? addressBookSort : peerSort;
+    final sortTypes = widget.isAddressBook
+        ? AddressBookSortType.values
+        : PeerSortType.values;
+    final optionKey = widget.isAddressBook
+        ? AddressBookSortType.optionKey
+        : kOptionPeerSorting;
     final style = TextStyle(
         color: Theme.of(context).textTheme.titleLarge?.color,
         fontSize: MenuConfig.fontSize,
@@ -892,20 +907,27 @@ class _PeerSortDropdownState extends State<PeerSortDropdown> {
         height: 36,
         enabled: false,
         child: Text(translate("Sort by"), style: style)));
-    for (var e in PeerSortType.values) {
+    for (var e in sortTypes) {
       items.add(PopupMenuItem(
           height: 36,
           child: Obx(() => Center(
                 child: SizedBox(
                   height: 36,
                   child: getRadio(
-                      Text(translate(e), style: style), e, peerSort.value,
+                      Text(
+                          widget.isAddressBook &&
+                                  e == AddressBookSortType.remoteId
+                              ? 'ID'
+                              : translate(e),
+                          style: style),
+                      e,
+                      selectedSort.value,
                       dense: true, (String? v) async {
                     if (v != null) {
-                      peerSort.value = v;
+                      selectedSort.value = v;
                       await bind.setLocalFlutterOption(
-                        k: kOptionPeerSorting,
-                        v: peerSort.value,
+                        k: optionKey,
+                        v: selectedSort.value,
                       );
                     }
                   }),

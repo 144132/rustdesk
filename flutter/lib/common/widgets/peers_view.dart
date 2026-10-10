@@ -14,6 +14,7 @@ import 'package:visibility_detector/visibility_detector.dart';
 import 'package:window_manager/window_manager.dart';
 
 import '../../common.dart';
+import '../../models/address_book_sort.dart';
 import '../../models/peer_model.dart';
 import '../../models/platform_model.dart';
 import 'peer_card.dart';
@@ -59,6 +60,18 @@ RxString? _peerSort;
 RxString get peerSort {
   _peerSort ??= bind.getLocalFlutterOption(k: kOptionPeerSorting).obs;
   return _peerSort!;
+}
+
+RxString? _addressBookSort;
+RxString get addressBookSort {
+  if (_addressBookSort == null) {
+    final saved = bind.getLocalFlutterOption(k: AddressBookSortType.optionKey);
+    _addressBookSort = (AddressBookSortType.values.contains(saved)
+            ? saved
+            : AddressBookSortType.remoteId)
+        .obs;
+  }
+  return _addressBookSort!;
 }
 
 // list for listener
@@ -305,7 +318,9 @@ class _PeersViewState extends State<_PeersView>
         },
         future: matchPeers(filters[0].value, filters[1].value, peers.peers),
       );
-    }, obslist);
+    }, widget.peerTabIndex == PeerTabIndex.ab
+        ? [peerSearchText, addressBookSort].obs
+        : obslist);
 
     return body;
   }
@@ -365,7 +380,8 @@ class _PeersViewState extends State<_PeersView>
     }
 
     // fallback to id sorting
-    if (!PeerSortType.values.contains(sortedBy)) {
+    if (widget.peerTabIndex != PeerTabIndex.ab &&
+        !PeerSortType.values.contains(sortedBy)) {
       sortedBy = PeerSortType.remoteId;
       bind.setLocalFlutterOption(
         k: kOptionPeerSorting,
@@ -373,7 +389,16 @@ class _PeersViewState extends State<_PeersView>
       );
     }
 
-    if (widget.peers.loadEvent != LoadEvent.recent) {
+    if (widget.peerTabIndex == PeerTabIndex.ab) {
+      sortAddressBookPeers<Peer>(
+        peers,
+        sortedBy,
+        id: (peer) => peer.id,
+        alias: (peer) => peer.alias,
+        hostname: (peer) => peer.hostname,
+        online: (peer) => peer.online,
+      );
+    } else if (widget.peers.loadEvent != LoadEvent.recent) {
       switch (sortedBy) {
         case PeerSortType.remoteId:
           peers.sort((p1, p2) => p1.getId().compareTo(p2.getId()));

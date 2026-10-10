@@ -45,7 +45,7 @@ env:
   VCPKG_COMMIT_ID: "9e593bb18ea69cc5095e012465dcd675a822ed0d"
   VCPKG_CMAKE_VERSION: "4.3.0"
   ARMV7_VCPKG_COMMIT_ID: "6f29f12e82a8293156836ad81cc9bf5af41fe836" # 2025.01.13, got "/opt/artifacts/vcpkg/vcpkg: No such file or directory" with latest version
-  VERSION: "1.5.1-202610100053"
+  VERSION: "1.5.1-202610101518"
   ANDROID_BUILD_NUMBER: "2026092010"
   NDK_VERSION: "r28c"
   #signing keys env variable checks
@@ -265,6 +265,11 @@ jobs:
           lib/models/chat_model.dart
           lib/models/server_model.dart
           test/cm_window_policy_test.dart
+          lib/common/widgets/peer_tab_page.dart
+          lib/common/widgets/peers_view.dart
+          lib/models/address_book_sort.dart
+          test/address_book_sort_test.dart
+          test/support/address_book_sort_cases.dart
 
       - name: Test Flutter suite
         working-directory: flutter

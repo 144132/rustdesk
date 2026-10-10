@@ -770,5 +770,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("port-forward-mux-tip", ""),
         ("Enable WebRTC P2P connection", ""),
         ("Enable TCP hole punching", ""),
+        ("Custom name", ""),
+        ("Online status", ""),
+        ("Device name", ""),
     ].iter().cloned().collect();
 }

@@ -776,5 +776,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("port-forward-mux-tip", "同一条端口转发规则上的所有连接共用一条到对方的连接，而不是每条连接都重新连接并登录一次。"),
         ("Enable WebRTC P2P connection", "启用 WebRTC P2P 连接"),
         ("Enable TCP hole punching", "启用 TCP 打洞"),
+        ("Custom name", "自定义名称"),
+        ("Online status", "在线状态"),
+        ("Device name", "设备名称"),
     ].iter().cloned().collect();
 }

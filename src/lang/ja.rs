@@ -770,5 +770,8 @@ pub static ref T: std::collections::HashMap<&'static str, &'static str> =
         ("port-forward-mux-tip", "1 つのポート転送のすべての接続を、相手への 1 本の接続にまとめます。接続ごとに接続とログインをやり直しません。"),
         ("Enable WebRTC P2P connection", "WebRTC P2P 接続を有効化する"),
         ("Enable TCP hole punching", "TCP ホールパンチを有効化する"),
+        ("Custom name", ""),
+        ("Online status", ""),
+        ("Device name", ""),
     ].iter().cloned().collect();
 }
