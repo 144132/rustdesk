@@ -286,6 +286,7 @@ void runMultiWindow(
 }
 
 void runConnectionManagerScreen() async {
+  if (isWindows) await windowManager.setPreventClose(true);
   await initEnv(kAppTypeConnectionManager);
   await gFFI.serverModel.refreshCmAccountState();
   _runApp(

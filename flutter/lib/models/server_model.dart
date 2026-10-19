@@ -151,6 +151,9 @@ class ServerModel with ChangeNotifier {
   bool get isConnectionInfoOnlyWindow =>
       _clients.isNotEmpty && _clients.every(isConnectionInfoOnly);
 
+  bool get shouldMinimizeCmOnClose => shouldMinimizeConnectionManagerOnClose(
+      _clients.where((client) => !client.disconnected).map(_cmWindowMode));
+
   bool _clientRequestsCmWindow(Client client) =>
       _cmWindowMode(client) != ConnectionManagerWindowMode.hidden;
 

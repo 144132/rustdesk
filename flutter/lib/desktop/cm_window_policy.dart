@@ -1,5 +1,9 @@
 enum ConnectionManagerWindowMode { hidden, minimized, visible }
 
+bool shouldMinimizeConnectionManagerOnClose(
+        Iterable<ConnectionManagerWindowMode> activeConnections) =>
+    activeConnections.contains(ConnectionManagerWindowMode.minimized);
+
 ConnectionManagerWindowMode connectionManagerWindowMode({
   required bool isWindows,
   required bool isLoggedIn,

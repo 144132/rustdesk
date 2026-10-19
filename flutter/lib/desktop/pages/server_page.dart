@@ -63,6 +63,10 @@ class _DesktopServerPageState extends State<DesktopServerPage>
 
   @override
   void onWindowClose() {
+    if (gFFI.serverModel.shouldMinimizeCmOnClose) {
+      windowManager.minimize();
+      return;
+    }
     // Other platforms keep the old behaviour exactly: the ambiguity this guards against is a
     // Linux session logout, which closes every window in the session.
     final byOperator = _cmClosedByOperator || !isLinux;

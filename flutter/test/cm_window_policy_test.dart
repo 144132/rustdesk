@@ -3,6 +3,48 @@ import 'package:flutter_test/flutter_test.dart';
 import '../lib/desktop/cm_window_policy.dart';
 
 void main() {
+  group('connection manager system close', () {
+    for (final scenario in <(String, List<ConnectionManagerWindowMode>, bool)>[
+      ('remote only', [ConnectionManagerWindowMode.minimized], true),
+      (
+        'remote followed by an interactive request',
+        [
+          ConnectionManagerWindowMode.minimized,
+          ConnectionManagerWindowMode.visible
+        ],
+        true,
+      ),
+      (
+        'interactive request followed by a remote',
+        [
+          ConnectionManagerWindowMode.visible,
+          ConnectionManagerWindowMode.minimized
+        ],
+        true,
+      ),
+      (
+        'remote alongside a hidden connection',
+        [
+          ConnectionManagerWindowMode.hidden,
+          ConnectionManagerWindowMode.minimized
+        ],
+        true,
+      ),
+      (
+        'interactive connections only',
+        [ConnectionManagerWindowMode.visible],
+        false
+      ),
+      ('hidden connections only', [ConnectionManagerWindowMode.hidden], false),
+      ('no active connections', [], false),
+    ]) {
+      test(scenario.$1, () {
+        expect(
+            shouldMinimizeConnectionManagerOnClose(scenario.$2), scenario.$3);
+      });
+    }
+  });
+
   group('Windows remote connection manager', () {
     test('signed-out accounts minimize for either password display flag', () {
       for (final showCmWindow in [false, true]) {

@@ -445,6 +445,10 @@ class _DesktopTabState extends State<DesktopTab>
 
   @override
   void onWindowClose() async {
+    if (tabType == DesktopTabType.cm &&
+        gFFI.serverModel.shouldMinimizeCmOnClose) {
+      return;
+    }
     mainWindowClose() async => await windowManager.hide();
     notMainWindowClose(WindowController windowController) async {
       if (controller.length != 0) {
