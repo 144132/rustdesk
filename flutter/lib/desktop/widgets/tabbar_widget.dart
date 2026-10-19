@@ -341,6 +341,8 @@ class _DesktopTabState extends State<DesktopTab>
 
   _DesktopTabState() : super();
 
+  // Retain the baseline helper when adding this file to scoped CI analysis.
+  // ignore: unused_element
   static RxString tablabelGetter(String peerId) {
     final alias = bind.mainGetPeerOptionSync(id: peerId, key: 'alias');
     return RxString(getDesktopTabLabel(peerId, alias));
